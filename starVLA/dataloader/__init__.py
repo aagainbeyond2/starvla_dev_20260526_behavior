@@ -45,16 +45,21 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             balance_trajectory_weights=vla_dataset_cfg.get("balance_trajectory_weights", False),
         )
         
+        _nw = int(vla_dataset_cfg.get("num_workers", 8))
+        _dl_kwargs = dict(pin_memory=True)
+        if _nw > 0:
+            _dl_kwargs.update(
+                persistent_workers=bool(vla_dataset_cfg.get("persistent_workers", True)),
+                prefetch_factor=int(vla_dataset_cfg.get("prefetch_factor", 2)),
+            )
         vla_train_dataloader = DataLoader(
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             collate_fn=collate_fn,
-            num_workers=16,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            num_workers=_nw,
+            **_dl_kwargs,
             # shuffle=True
-        )        
+        )
         if dist.get_rank() == 0: 
             
             output_dir = Path(cfg.output_dir)
@@ -75,15 +80,22 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
         )
         vla_sampler = make_behavior_skill_sampler(vla_dataset)
 
+        # DataLoader 资源可配 (默认下调, 防止 HEVC 视频解码把主机 RAM 打爆 -> OOM-killer
+        # 杀 worker -> DDP 挂)。num_workers 是每个 rank 的; 8 卡总 worker = num_workers*8。
+        _nw = int(vla_dataset_cfg.get("num_workers", 8))
+        _dl_kwargs = dict(pin_memory=True)
+        if _nw > 0:
+            _dl_kwargs.update(
+                persistent_workers=bool(vla_dataset_cfg.get("persistent_workers", True)),
+                prefetch_factor=int(vla_dataset_cfg.get("prefetch_factor", 2)),
+            )
         vla_train_dataloader = DataLoader(
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             sampler=vla_sampler,
             collate_fn=collate_fn,
-            num_workers=16,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            num_workers=_nw,
+            **_dl_kwargs,
         )
         if dist.get_rank() == 0:
             output_dir = Path(cfg.output_dir)

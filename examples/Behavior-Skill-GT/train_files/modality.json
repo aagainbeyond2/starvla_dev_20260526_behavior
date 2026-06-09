@@ -1,0 +1,62 @@
+{
+  "action": {
+    "base": {
+      "start": 0,
+      "end": 3,
+      "original_key": "action"
+    },
+    "torso": {
+      "start": 3,
+      "end": 7,
+      "original_key": "action"
+    },
+    "left_arm": {
+      "start": 7,
+      "end": 14,
+      "original_key": "action"
+    },
+    "left_gripper": {
+      "start": 14,
+      "end": 15,
+      "original_key": "action"
+    },
+    "right_arm": {
+      "start": 15,
+      "end": 22,
+      "original_key": "action"
+    },
+    "right_gripper": {
+      "start": 22,
+      "end": 23,
+      "original_key": "action"
+    }
+  },
+  "state": {
+    "joint_qpos_sin": {
+      "start": 34,
+      "end": 56,
+      "original_key": "observation.state"
+    },
+    "joint_qpos_cos": {
+      "start": 62,
+      "end": 84,
+      "original_key": "observation.state"
+    }
+  },
+  "video": {
+    "head": {
+      "original_key": "observation.images.rgb.head"
+    },
+    "left_wrist": {
+      "original_key": "observation.images.rgb.left_wrist"
+    },
+    "right_wrist": {
+      "original_key": "observation.images.rgb.right_wrist"
+    }
+  },
+  "annotation": {
+    "human.action.task_description": {
+      "original_key": "episode_index"
+    }
+  }
+}
