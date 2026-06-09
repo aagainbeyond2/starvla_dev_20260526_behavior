@@ -62,7 +62,7 @@ datasets:
       - action.right_arm
     action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
     per_device_batch_size: 16
-    video_backend: torchvision_av
+    video_backend: decord  # 原 torchvision_av(PyAV) 会随访问文件数累积解码缓冲->主机RAM OOM; decord 恒定~1.56G/worker
     # DataLoader 资源(防主机 RAM OOM): num_workers 是每个 rank 的, 8 卡总 worker = ×8
     num_workers: 8
     prefetch_factor: 2
