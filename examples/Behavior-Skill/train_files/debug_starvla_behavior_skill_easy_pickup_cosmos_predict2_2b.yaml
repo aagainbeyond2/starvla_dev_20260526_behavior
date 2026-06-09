@@ -1,0 +1,119 @@
+run_id: debug_starvla_behavior_skill_easy_pickup_cosmos_predict2_2b
+run_root_dir: ../starVLA_playground/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+# === WM4A: World Model for Action (Cosmos-Predict2-2B backbone) ===
+# This config trains a WM4A framework that uses the Cosmos-Predict2 video
+# diffusion model (DiT + VAE + T5) as the perception backbone instead of a VLM.
+#
+# Switch between the two supported heads by changing `framework.name`:
+#   - CosmoPredict2GR00T : flow-matching (DiT) diffusion head   (active below)
+#   - CosmoPredict2OFT   : lightweight MLP L1-regression head   (see comment)
+framework:
+  name: CosmoPredict2GR00T
+
+  # Cosmos-Predict2 world-model backbone (VAE + T5 + DiT).
+  world_model:
+    base_wm: ../starVLA_playground/Pretrained_models/nvidia/Cosmos-Predict2-2B-Video2World/
+    extract_layers: [-1]
+
+  # Legacy-compat: some action heads still read qwenvl.vl_hidden_dim, and the
+  # world-model factory falls back to qwenvl.base_vlm when world_model is absent.
+  qwenvl:
+    base_vlm: ../starVLA_playground/Pretrained_models/nvidia/Cosmos-Predict2-2B-Video2World/
+    vl_hidden_dim: 2048
+
+  # --- Flow-matching (GR00T) action head ---
+  action_model:
+    action_model_type: DiT-B
+    action_dim: 23
+    state_dim: 44
+    action_horizon: 30
+    action_hidden_dim: 1024
+    hidden_size: 1024
+    add_pos_embed: true
+    max_seq_len: 1024
+    repeated_diffusion_steps: 8
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 4
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:
+      cross_attention_dim: 2048  # auto-aligned to world-model hidden_size at runtime
+      action_dit_hidden_dim: 1024
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: ada_norm
+      num_layers: 16
+      output_dim: 1024
+      positional_embeddings: null
+      attention_head_dim: 64
+
+  # --- Alternative: CosmoPredict2OFT (MLP L1-regression head) ---
+  # To train the OFT variant instead, set `framework.name: CosmoPredict2OFT`
+  # and replace the `action_model` block above with:
+  #
+  # action_model:
+  #   action_model_type: MLP
+  #   action_dim: 23
+  #   action_hidden_dim: 2048   # auto-aligned to world-model hidden_size at runtime
+  #   action_horizon: 30
+  #   past_action_window_size: 0
+
+datasets:
+  vla_data:
+    dataset_py: behavior_skill_lerobot_datasets
+    data_root_dir: ../starVLA_playground/behavior-own/easy
+    data_mix: behavior_skill_easy
+    balance_dataset_weights: true
+    balance_trajectory_weights: true
+    include_source_span_names: [pick_up_from]
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
+    per_device_batch_size: 8
+    video_backend: torchvision_av
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  repeated_diffusion_steps: 2
+  max_train_steps: 40000
+  num_warmup_steps: 1000
+  save_interval: 5000
+  eval_interval: 100
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
