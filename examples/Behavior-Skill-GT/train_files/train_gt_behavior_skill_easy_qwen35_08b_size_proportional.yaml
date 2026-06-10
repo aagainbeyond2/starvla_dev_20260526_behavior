@@ -63,9 +63,9 @@ datasets:
     action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
     per_device_batch_size: 16
     video_backend: decord  # 原 torchvision_av(PyAV) 会随访问文件数累积解码缓冲->主机RAM OOM; decord 恒定~1.56G/worker
-    # DataLoader 资源(防主机 RAM OOM): num_workers 是每个 rank 的, 8 卡总 worker = ×8
-    num_workers: 8
-    prefetch_factor: 2
+    # DataLoader 资源: num_workers 是每个 rank 的, 8 卡总 worker = ×8。RAM 泄露真因是 video_backend(已 -> decord),与此无关,故恢复原默认 16/4
+    num_workers: 16
+    prefetch_factor: 4
     image_augmentation:
       enabled: true
       brightness: 0.3
