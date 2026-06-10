@@ -29,6 +29,7 @@ from starVLA.dataloader.gr00t_lerobot.datasets import (
     _normalize_action_mode_apply_keys,
     _normalize_action_mode_state_map,
 )
+from starVLA.dataloader.gr00t_lerobot.video import get_frames_by_timestamps
 
 
 def _resolve_repo_relative_path(path_str: str) -> Path:
@@ -431,3 +432,52 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
             )
         data = self._apply_action_mode(data)
         return data
+
+    # ---- 源视频直读(可选): datasets.vla_data.source_video_root 指向原始 behavior-1k_demo 的 videos/ 根 ----
+    # 开启后跳过切段 mp4, 直接按 parquet 的 source_episode_index/source_timestamp 去原视频取帧
+    # (无损像素; 路径规律 task-{src//10^4:04d}/{video_key}/episode_{src:08d}.mp4, 与切段血缘已逐位验证一致)。
+    # 开关 datasets.vla_data.use_local_videos: true 时强制读各 subtask 自己 videos/ 下的切段(忽略 source_video_root)。
+    # 两者都不配置则行为与基类完全相同。
+
+    def _get_source_video_root(self) -> Path | None:
+        if not hasattr(self, "_source_video_root"):
+            use_local = bool(self.data_cfg.get("use_local_videos", False)) if self.data_cfg else False
+            root = None if use_local else (self.data_cfg.get("source_video_root", None) if self.data_cfg else None)
+            self._source_video_root = Path(root) if root else None
+        return self._source_video_root
+
+    def get_video(self, trajectory_id: int, key: str, base_index: int) -> np.ndarray:
+        source_root = self._get_source_video_root()
+        if source_root is None:
+            return super().get_video(trajectory_id, key, base_index)
+
+        # 帧窗口与越界 padding 逻辑与基类 get_video 保持一致
+        step_indices = self.delta_indices[key] + base_index
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        step_indices = np.maximum(step_indices, 0)
+        step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
+        assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
+        key = key.replace("video.", "")
+        original_key = self.lerobot_modality_meta.video[key].original_key or key
+
+        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+        for col in ("source_episode_index", "source_timestamp"):
+            if col not in self.curr_traj_data.columns:
+                raise ValueError(
+                    f"source_video_root requires parquet column '{col}' (missing in {trajectory_id=})"
+                )
+        source_episode = int(self.curr_traj_data["source_episode_index"].iloc[0])
+        # source_timestamp 即原视频时间轴上的秒数(= source_frame_index / fps)
+        video_timestamp = self.curr_traj_data["source_timestamp"].to_numpy()[step_indices]
+        video_path = (
+            source_root
+            / f"task-{source_episode // 10000:04d}"
+            / original_key
+            / f"episode_{source_episode:08d}.mp4"
+        )
+        return get_frames_by_timestamps(
+            video_path.as_posix(),
+            video_timestamp,
+            video_backend=self.video_backend,
+            video_backend_kwargs=self.video_backend_kwargs,
+        )

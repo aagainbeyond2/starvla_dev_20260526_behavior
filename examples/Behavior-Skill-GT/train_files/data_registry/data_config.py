@@ -172,7 +172,7 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 }
 
 
-# GT 混采：data_root_dir = Behavior_Skill_V1.0_v4/easy，子集名为两级 skill_type/skill_subtask
+# GT 混采：data_root_dir = Behavior_Skill_V1.0/easy(与 v4/easy 叶子名/episode数完全一致, 可互换)，子集名为两级 skill_type/skill_subtask
 # (loader 用 dataset_path = data_root_dir / name)。全量 34 个 skill_subtask / 10588 eps。
 DATASET_NAMED_MIXTURES = {
     # 冒烟用：单 subtask

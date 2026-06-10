@@ -1,4 +1,4 @@
-run_id: gt_behavior_skill_easy_size_proportional
+run_id: gt_behavior_skill_easy_v1_size_proportional
 run_root_dir: ./results/Checkpoints
 logging_backend: tensorboard
 seed: 42
@@ -45,8 +45,13 @@ datasets:
 
   vla_data:
     dataset_py: behavior_skill_lerobot_datasets
-    # data_root_dir / data_mix: 指向 v4/easy 与 GT 全量 34-subtask 混采
-    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0_v4/easy
+    # data_root_dir / data_mix: 指向 V1.0/easy(mpeg4/GOP12, 随机读帧快) 与 GT 全量 34-subtask 混采
+    # 注意: 经 run_gt_behavior_skill_easy_8gpu.sh 启动时此值会被脚本的 BEHAVIOR_SKILL_DATA_ROOT 覆盖
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
+    # 源视频直读: 跳过切段mp4, 按parquet的source_episode_index/source_timestamp直接读原始behavior-1k视频(无损像素)。
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    # 开关: true=读各subtask自己videos/下的切段(忽略上面的source_video_root); false=直读behavior-1k原始视频
+    use_local_videos: false
     data_mix: gt_behavior_skill_easy
     # 采样策略[size_proportional]: balance_dataset_weights=true
     #   -> 采样概率 ∝ 各 skill_subtask 轨迹总长(数据量); 大集采得多,

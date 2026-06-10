@@ -20,8 +20,8 @@ playground_root="${PLAYGROUND_ROOT:-./playground}"
 logging_backend="${LOGGING_BACKEND:-tensorboard}"
 framework_name="${FRAMEWORK_NAME:-QwenPI_v3}"
 base_vlm="${BASE_VLM:-${playground_root}/Pretrained_models/Qwen3.5-0.8B}"
-# v4/easy 真实数据根
-behavior_skill_data_root="${BEHAVIOR_SKILL_DATA_ROOT:-/nfs/AIGC/weiguoting/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0_v4/easy}"
+# V1.0/easy 真实数据根(此默认值会覆盖 yaml 里的 data_root_dir; 临时换数据用 BEHAVIOR_SKILL_DATA_ROOT=... 环境变量)
+behavior_skill_data_root="${BEHAVIOR_SKILL_DATA_ROOT:-/nfs/AIGC/weiguoting/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy}"
 action_loss_type="${ACTION_LOSS_TYPE:-}"
 train_debug_enabled="${TRAIN_DEBUG_ENABLED:-}"
 train_debug_dump_every_steps="${TRAIN_DEBUG_DUMP_EVERY_STEPS:-}"
