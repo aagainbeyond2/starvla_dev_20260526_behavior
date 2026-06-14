@@ -1,4 +1,4 @@
-run_id: gt_behavior_skill_easy_v1_size_proportional
+run_id: gt_behavior_skill_easy_v1_subtask_uniform
 run_root_dir: ./results/Checkpoints
 logging_backend: tensorboard
 seed: 42
@@ -46,17 +46,18 @@ datasets:
   vla_data:
     dataset_py: behavior_skill_lerobot_datasets
     # data_root_dir / data_mix: 指向 V1.0/easy(mpeg4/GOP12, 随机读帧快) 与 GT 全量 34-subtask 混采
-    # 注意: 经 run_gt_behavior_skill_easy_8gpu.sh 启动时此值会被脚本的 BEHAVIOR_SKILL_DATA_ROOT 覆盖
+    # 注意: 经 training_scripts/{single_nodes,multi_nodes}/ 入口脚本启动时此值会被脚本的 BEHAVIOR_SKILL_DATA_ROOT 覆盖
     data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
     # 源视频直读: 跳过切段mp4, 按parquet的source_episode_index/source_timestamp直接读原始behavior-1k视频(无损像素)。
     source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
     # 开关: true=读各subtask自己videos/下的切段(忽略上面的source_video_root); false=直读behavior-1k原始视频
     use_local_videos: false
     data_mix: gt_behavior_skill_easy
-    # 采样策略[size_proportional]: balance_dataset_weights=true
-    #   -> 采样概率 ∝ 各 skill_subtask 轨迹总长(数据量); 大集采得多,
-    #   贴近真实采集分布, 小集(pour/press)不易过拟合但曝光更少。
-    balance_dataset_weights: true
+    # 采样策略[subtask_uniform]: balance_dataset_weights=false
+    #   -> 34 个 skill_subtask 各 1/34 等概率(与 episode 数无关)。
+    #   注意: 这是按 skill_subtask 等概率, 不是按 skill_type; subtask 多的
+    #   skill_type 整体占比更高(pick_up 12个 -> ~35%, pour/press 各1个 -> ~3%)。
+    balance_dataset_weights: false
     balance_trajectory_weights: true
     # 全量训练: 不做 source_span 过滤(旧 [pick_up_from] 会丢掉绝大多数数据)
     include_source_span_names: []
@@ -67,7 +68,7 @@ datasets:
       - action.right_arm
     action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
     per_device_batch_size: 16
-    video_backend: decord  # 原 torchvision_av(PyAV) 会随访问文件数累积解码缓冲->主机RAM OOM; decord 恒定~1.56G/worker
+    video_backend: decord  # 实测: 与 torchvision_av 训练速度相同(s/it~2.7, data_times~0解码被prefetch掩盖), 但 torchvision_av 泄漏主机RAM、decord 恒定~1.56G/worker -> 用 decord
     # DataLoader 资源: num_workers 是每个 rank 的, 8 卡总 worker = ×8。RAM 泄露真因是 video_backend(已 -> decord),与此无关,故恢复原默认 16/4
     num_workers: 16
     prefetch_factor: 4
@@ -81,7 +82,7 @@ datasets:
 
 trainer:
   repeated_diffusion_steps: 8
-  max_train_steps: 100000
+  max_train_steps: 150000
   num_warmup_steps: 5000
   save_interval: 2500
   eval_interval: 100

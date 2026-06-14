@@ -1,0 +1,106 @@
+run_id: gt_behavior_skill_easy_v1_size_proportional
+run_root_dir: ./results/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+framework:
+  name: QwenPI_v3
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/Qwen3.5-0.8B
+    attn_implementation: flash_attention_2
+    vl_hidden_dim: 2048
+
+  action_model:
+    action_dim: 23
+    state_dim: 44
+    action_horizon: 30
+    repeated_diffusion_steps: 8
+    diffusion_model_cfg:
+      action_dit_hidden_dim: 1024
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: ada_norm
+      positional_embeddings: null
+      attention_head_dim: 64
+
+datasets:
+  # # 注: 入口 train_starvla.py 只构建 vla_data; 下面 vlm_data 块惰性不加载(VLM cotrain 未激活)。
+  # vlm_data:
+  #   dataset_py: vlm_datasets
+  #   dataformat: llava_json
+  #   dataset_use: sharegpt4v_coco
+  #   eval_dataset: sharegpt4v_coco
+  #   data_flatten: false
+  #   base_interval: 2
+  #   max_pixels: 307200
+  #   min_pixels: 784
+  #   model_max_length: 2048
+  #   model_type: qwen2.5vl
+  #   per_device_batch_size: 8
+
+  vla_data:
+    dataset_py: behavior_skill_lerobot_datasets
+    # data_root_dir / data_mix: 指向 V1.0/easy(mpeg4/GOP12, 随机读帧快) 与 GT 全量 34-subtask 混采
+    # 注意: 经 training_scripts/{single_nodes,multi_nodes}/ 入口脚本启动时此值会被脚本的 BEHAVIOR_SKILL_DATA_ROOT 覆盖
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
+    # 源视频直读: 跳过切段mp4, 按parquet的source_episode_index/source_timestamp直接读原始behavior-1k视频(无损像素)。
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    # 开关: true=读各subtask自己videos/下的切段(忽略上面的source_video_root); false=直读behavior-1k原始视频
+    use_local_videos: false
+    data_mix: gt_behavior_skill_easy
+    # 采样策略[size_proportional]: balance_dataset_weights=true
+    #   -> 采样概率 ∝ 各 skill_subtask 轨迹总长(数据量); 大集采得多,
+    #   贴近真实采集分布, 小集(pour/press)不易过拟合但曝光更少。
+    balance_dataset_weights: true
+    balance_trajectory_weights: true
+    # 全量训练: 不做 source_span 过滤(旧 [pick_up_from] 会丢掉绝大多数数据)
+    include_source_span_names: []
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
+    per_device_batch_size: 16
+    video_backend: decord  # 原 torchvision_av(PyAV) 会随访问文件数累积解码缓冲->主机RAM OOM; decord 恒定~1.56G/worker
+    # DataLoader 资源: num_workers 是每个 rank 的, 8 卡总 worker = ×8。RAM 泄露真因是 video_backend(已 -> decord),与此无关,故恢复原默认 16/4
+    num_workers: 16
+    prefetch_factor: 4
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  repeated_diffusion_steps: 8
+  max_train_steps: 150000
+  num_warmup_steps: 5000
+  save_interval: 2500
+  eval_interval: 100
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
