@@ -8,8 +8,6 @@
 #       bash .../single_nodes/run_gt_behavior_skill_easy_singlenode.sh
 # 常用覆盖: NUM_PROCESSES=8 / BEHAVIOR_SKILL_DATA_ROOT=... / RUN_ID=... / RUN_ROOT_DIR=...
 # ============================================================================
-set -euo pipefail
-
 # ---- 单机网络/NCCL(loopback, IB 关闭)----
 unset NCCL_IB_HCA
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-lo}"

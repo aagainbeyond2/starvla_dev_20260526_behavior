@@ -14,8 +14,6 @@
 # 训练走 accelerate launch + deepspeed(deepspeed_multinode_launcher: standard), 故由每节点
 # 各自的 accelerate 以 --machine_rank 静态 rendezvous(与本仓库 robocasa 多机同一模式)。
 # ============================================================================
-set -euo pipefail
-
 # ---- 从平台环境变量推导多机拓扑 ----
 NNODES="${PET_NNODES:-${NNODES:-1}}"
 NPROC_PER_NODE="${PET_NPROC_PER_NODE:-${NPROC_PER_NODE:-8}}"

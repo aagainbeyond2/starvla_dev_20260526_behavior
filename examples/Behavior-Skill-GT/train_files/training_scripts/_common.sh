@@ -8,7 +8,7 @@
 #   3) 把 `accelerate launch` 之后的全部训练参数装进数组 LAUNCH_TAIL[]。
 # 不负责的: accelerate 的「机器数/进程数/网络」那几行 —— 单机 vs 多机由各入口脚本自己加。
 #
-# 入口脚本约定: 先 `set -euo pipefail`, 设好本节点的网络/NCCL 环境, 再 source 本文件,
+# 入口脚本约定: 设好本节点的网络/NCCL 环境后 source 本文件,
 # 然后调用 `accelerate launch --config_file "${accel_ds_config}" <机器flags> "${LAUNCH_TAIL[@]}"`。
 # ============================================================================
 
