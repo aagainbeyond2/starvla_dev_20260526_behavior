@@ -8,6 +8,7 @@
 - `starVLA/model/framework/VLM4A/QwenPI_v3.py`
 - `starVLA/dataloader/gr00t_lerobot/datasets.py`
 - `starVLA/training/trainer_utils/trainer_tools.py`
+- `starVLA/model/modules/world_model/CosmoPredict2.py`
 
 ## 新增了哪些文件
 - `examples/Behavior-Skill/README.md`
@@ -16,8 +17,10 @@
 - `examples/Behavior-Skill/serve_starvla_for_eval.py`
 - `examples/Behavior-Skill/start_parallel_eval_behavior_skill.sh`
 - `examples/Behavior-Skill/train_files/run_qwenpi_v3_behavior_skill_easy_8gpu.sh`
+- `examples/Behavior-Skill/train_files/run_cosmos_predict2_behavior_skill_easy_8gpu.sh`
 - `examples/Behavior-Skill/train_files/data_registry/data_config.py`
 - `examples/Behavior-Skill/train_files/demo_starvla_behavior_skill_easy_qwen35_08b.yaml`
+- `examples/Behavior-Skill/train_files/debug_starvla_behavior_skill_easy_pickup_cosmos_predict2_2b.yaml`
 - `starVLA/dataloader/behavior_skill_lerobot_datasets.py`
 - `starVLA/dataloader/gr00t_lerobot/behavior_skill_dataset.py`
 - `starVLA/dataloader/gr00t_lerobot/behavior1k_utils.py`

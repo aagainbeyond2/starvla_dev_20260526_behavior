@@ -20,10 +20,11 @@ Key difference from VLM wrappers:
     that does not depend on VLM-specific naming conventions.
 """
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
+from PIL import Image
 
 from starVLA.training.trainer_utils import initialize_overwatch
 
@@ -90,6 +91,16 @@ class _CosmoPredict2_Interface(nn.Module):
         self.vae_scale_factor_temporal = 2 ** sum(self.vae.temperal_downsample)
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
+        # Observation resolution for the (single) composed multi-view frame.
+        # Route A: multiple camera views are tiled into ONE frame (see _encode_images),
+        # so they are encoded as a single video timestep instead of a fake 3-frame clip.
+        # Configurable via world_model.obs_resolution: [height, width].
+        # 480x832 is the Cosmos-Predict2 pretrained resolution; spatial dims must be
+        # multiples of vae_scale_factor_spatial. Default keeps ~16:9 to save VRAM.
+        obs_res = wm_cfg.get("obs_resolution", [320, 576])
+        self._obs_height = self._round_to_multiple(int(obs_res[0]), self.vae_scale_factor_spatial)
+        self._obs_width = self._round_to_multiple(int(obs_res[1]), self.vae_scale_factor_spatial)
+
         # Freeze VAE and text encoder by default
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
@@ -122,6 +133,61 @@ class _CosmoPredict2_Interface(nn.Module):
         shim = _ModelShim()
         shim.config = self._model_config
         return shim
+
+    @staticmethod
+    def _round_to_multiple(value: int, multiple: int) -> int:
+        """Round value to the nearest positive multiple of `multiple` (VAE-friendly)."""
+        if multiple <= 1:
+            return max(1, value)
+        return max(multiple, int(round(value / multiple)) * multiple)
+
+    @staticmethod
+    def _letterbox(img: Image.Image, target_h: int, target_w: int) -> Image.Image:
+        """Aspect-ratio-preserving resize + center pad (letterbox).
+
+        Scales `img` to fit inside (target_h, target_w) without distorting the
+        aspect ratio, then pads the remaining border with black. This replaces
+        the previous force-resize-to-square behaviour that stretched the image.
+        """
+        img = img.convert("RGB")
+        src_w, src_h = img.size
+        if src_w == 0 or src_h == 0:
+            return Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        scale = min(target_w / src_w, target_h / src_h)
+        new_w = max(1, int(round(src_w * scale)))
+        new_h = max(1, int(round(src_h * scale)))
+        resized = img.resize((new_w, new_h), Image.BILINEAR)
+        canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        canvas.paste(resized, ((target_w - new_w) // 2, (target_h - new_h) // 2))
+        return canvas
+
+    def _compose_views_single_frame(
+        self, views: Sequence[Image.Image], target_h: int, target_w: int
+    ) -> Image.Image:
+        """Tile multiple camera views horizontally into a SINGLE frame.
+
+        Route A: instead of stacking views along the temporal axis (which the
+        VAE would compress and treat as motion), we lay them out side-by-side in
+        the spatial dimension so all views survive as one observation timestep.
+        Each view is letterboxed into its tile to preserve aspect ratio.
+        """
+        views = [v for v in views]
+        num_views = len(views)
+        if num_views == 0:
+            return Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        if num_views == 1:
+            return self._letterbox(views[0], target_h, target_w)
+
+        base_tile_w = target_w // num_views
+        canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        x_offset = 0
+        for i, view in enumerate(views):
+            # Give the last tile any remainder pixels so the row fills target_w exactly.
+            tile_w = base_tile_w if i < num_views - 1 else target_w - base_tile_w * (num_views - 1)
+            tile = self._letterbox(view, target_h, tile_w)
+            canvas.paste(tile, (x_offset, 0))
+            x_offset += tile_w
+        return canvas
 
     def _register_hooks(self):
         """Register forward hooks on selected transformer blocks."""
@@ -165,68 +231,50 @@ class _CosmoPredict2_Interface(nn.Module):
         return text_embeds, text_inputs.attention_mask
 
     def _encode_images(self, images, num_frames=None):
-        """Encode observation images through VAE to get latent tokens.
+        """Encode observation images through the VAE to get latent tokens.
 
-        Follows the Cosmos pipeline approach: pad images to uniform frame count
-        with last-frame repetition, then VAE-encode the whole video.
+        Route A (multi-view as a single frame): the per-sample camera views are
+        tiled side-by-side into ONE composed frame (see _compose_views_single_frame),
+        with aspect-ratio-preserving letterbox padding. The composed frame is then
+        VAE-encoded as a single video timestep, so the views are NOT mistaken for
+        temporal motion and there is no aspect-distorting stretch.
 
         Args:
-            images: List of List of PIL Images [B, [imgs...]]
-            num_frames: If given, pad/truncate to this exact count.
-                If None (default), pad to the max frame count in the batch.
-                VAE temporal factor is 4, so T_latent = (num_frames-1)//4+1.
+            images: List (batch) of per-sample views. Each element is a list of
+                PIL Images (one per camera view), or a single PIL Image.
+            num_frames: Kept for API compatibility; unused under route A because
+                every sample is encoded as exactly one composed frame.
 
         Returns:
-            latents: [B, C, T_latent, H/8, W/8] video latent tensor
-            cond_frame_counts: list[int], real frame count per sample (before padding)
+            latents: [B, C, T_latent, H/8, W/8] video latent tensor (T_latent == 1)
+            cond_frame_counts: list[int], all 1 (single composed observation frame)
         """
         device = next(self.vae.parameters()).device
         dtype = self.vae.dtype
-        # 480×832 is the pretrained resolution; spatial dims must be multiples of 16.
-        # Smaller sizes (e.g. 224×224) technically work but hurt quality due to positional embedding mismatch.
-        # If saving VRAM, keep ~16:9 aspect ratio: 256×448 or 320×576.
-        height, width = 320, 576
+        height, width = self._obs_height, self._obs_width
 
-        # First pass: preprocess each sample, record real frame counts
-        preprocessed = []
-        cond_frame_counts = []
+        # Compose each sample's views into a single letterboxed frame, then
+        # preprocess (normalize to [-1, 1]); the composed frame is already at the
+        # target resolution so preprocess_video does not resize/stretch it.
+        batch_videos = []
         for sample_imgs in images:
             if not isinstance(sample_imgs, (list, tuple)):
                 sample_imgs = [sample_imgs]
 
-            video_tensor = self.video_processor.preprocess_video(sample_imgs, height=height, width=width)
-            video_tensor = video_tensor.to(device=device, dtype=dtype)  # [1, C, n_imgs, H, W]
-            preprocessed.append(video_tensor)
-            cond_frame_counts.append(video_tensor.shape[2])
+            composed = self._compose_views_single_frame(sample_imgs, height, width)
+            video_tensor = self.video_processor.preprocess_video([composed], height=height, width=width)
+            video_tensor = video_tensor.to(device=device, dtype=dtype)  # [1, C, 1, H, W]
+            batch_videos.append(video_tensor.squeeze(0))  # [C, 1, H, W]
 
-        # Determine target frame count: use num_frames if specified, otherwise batch max
-        # Ensure at least 1 frame (VAE needs T >= 1)
-        if num_frames is None:
-            target_frames = max(cond_frame_counts)
-        else:
-            target_frames = num_frames
+        # Single observation frame per sample -> every sample contributes 1 frame.
+        cond_frame_counts = [1] * len(batch_videos)
 
-        # Second pass: truncate or pad each sample to target_frames
-        batch_videos = []
-        for i, video_tensor in enumerate(preprocessed):
-            n = video_tensor.shape[2]
-            if n > target_frames:
-                video_tensor = video_tensor[:, :, :target_frames]
-                cond_frame_counts[i] = target_frames
-            elif n < target_frames:
-                # Pad with last-frame repetition (matches official pipeline)
-                last_frame = video_tensor[:, :, -1:]
-                padding = last_frame.repeat(1, 1, target_frames - n, 1, 1)
-                video_tensor = torch.cat([video_tensor, padding], dim=2)
-            batch_videos.append(video_tensor.squeeze(0))  # [C, target_frames, H, W]
-
-        # Stack to [B, C, target_frames, H, W]
+        # Stack to [B, C, 1, H, W]
         video = torch.stack(batch_videos, dim=0)
 
         with torch.no_grad():
-            # T_latent = temporal latent frames = (num_frames-1)//4+1  (VAE temporal downsample factor=4)
-            # e.g. 5 frames → 2 latent frames, 9 frames → 3 latent frames
-            latents = self.vae.encode(video).latent_dist.sample()  # [B, 16, T_latent, H/8, W/8]
+            # Single composed frame -> T_latent = (1-1)//temporal+1 = 1 latent timestep.
+            latents = self.vae.encode(video).latent_dist.sample()  # [B, 16, 1, H/8, W/8]
 
         # Normalize latents (matches official pipeline: prepare_latents) # TODO check if this normalization is actually needed
         if self.vae.config.latents_mean is not None:

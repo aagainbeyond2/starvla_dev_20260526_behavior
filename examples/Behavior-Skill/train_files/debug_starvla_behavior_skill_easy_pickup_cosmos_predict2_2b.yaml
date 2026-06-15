@@ -1,4 +1,4 @@
-run_id: debug_starvla_behavior_skill_easy_pickup_cosmos_predict2_2b
+32run_id: debug_starvla_behavior_skill_easy_pickup_cosmos_predict2_2b
 run_root_dir: ../starVLA_playground/Checkpoints
 logging_backend: tensorboard
 seed: 42
@@ -21,6 +21,11 @@ framework:
   world_model:
     base_wm: ../starVLA_playground/Pretrained_models/nvidia/Cosmos-Predict2-2B-Video2World/
     extract_layers: [-1]
+    # Resolution [height, width] of the single composed multi-view observation
+    # frame fed to the VAE. The 3 camera views are tiled side-by-side (route A)
+    # with aspect-preserving letterbox padding (no stretch). Must be multiples
+    # of the VAE spatial factor; ~16:9 keeps VRAM low vs the 480x832 pretrain.
+    obs_resolution: [320, 576]
 
   # Legacy-compat: some action heads still read qwenvl.vl_hidden_dim, and the
   # world-model factory falls back to qwenvl.base_vlm when world_model is absent.
@@ -38,7 +43,7 @@ framework:
     hidden_size: 1024
     add_pos_embed: true
     max_seq_len: 1024
-    repeated_diffusion_steps: 8
+    repeated_diffusion_steps: 4
     noise_beta_alpha: 1.5
     noise_beta_beta: 1.0
     noise_s: 0.999
@@ -93,14 +98,17 @@ datasets:
       random_grayscale_p: 0.05
 
 trainer:
-  repeated_diffusion_steps: 2
+  repeated_diffusion_steps: 4
   max_train_steps: 40000
   num_warmup_steps: 1000
   save_interval: 5000
   eval_interval: 100
   learning_rate:
     base: 2.5e-05
-    qwen_vl_interface: 1.0e-05
+    # Must match the real module attribute on the framework. For
+    # CosmoPredict2GR00T the world model is `self.backbone` (there is no
+    # `qwen_vl_interface`), so the backbone LR is keyed by `backbone`.
+    backbone: 1.0e-05
     action_model: 1.0e-04
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:

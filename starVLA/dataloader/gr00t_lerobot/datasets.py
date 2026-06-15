@@ -1382,6 +1382,11 @@ class LeRobotSingleDataset(Dataset):
         step_images = []
         for video_key in self.modality_keys["video"]:
             image = data[video_key][0]
+            # NOTE: This is shared base behaviour used by every framework (Qwen, etc.),
+            # so it is intentionally kept identical to the original pipeline. Backbones
+            # that need a different resolution / aspect handling (e.g. CosmoPredict2,
+            # which letterboxes each view) must do it on the model side, NOT here, to
+            # avoid changing other frameworks' training inputs.
             image = Image.fromarray(image).resize((224, 224))
             step_images.append(image)
 
@@ -1590,10 +1595,14 @@ class LeRobotSingleDataset(Dataset):
             else:
                 video_chunk_index = episode_meta["data/chunk_index"]
                 video_file_index = episode_meta["data/file_index"]
+            # Use the per-camera chunk/file indices resolved above. Previously this
+            # incorrectly formatted the path with the generic data/chunk_index and
+            # data/file_index, so per-view video files could be read from the wrong
+            # location whenever a camera's indices differed from the data indices.
             video_filename = self.video_path_pattern.format(
                 video_key=original_key,
-                chunk_index=episode_meta["data/chunk_index"],
-                file_index=episode_meta["data/file_index"],
+                chunk_index=video_chunk_index,
+                file_index=video_file_index,
             )
         return self.dataset_path / video_filename
 

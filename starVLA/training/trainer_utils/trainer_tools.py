@@ -134,7 +134,15 @@ def build_param_lr_groups(model, cfg):
                 param_groups.append({"params": params, "lr": lr, "name": module_name})
                 used_params.update(id(p) for p in params)
         except AttributeError:
-            ReferenceError(f"⚠️ module path `{module_name}` not found in vla")
+            # Loudly warn instead of silently dropping the per-module LR: previously
+            # this constructed a ReferenceError without raising/logging it, so a
+            # mis-named module (e.g. `qwen_vl_interface` when the attribute is
+            # `backbone`) would silently fall back to the base LR.
+            print(
+                f"⚠️ learning_rate module path `{module_name}` not found on model; "
+                f"its parameters will fall back to base LR. "
+                f"Check cfg.trainer.learning_rate keys match real module attribute names."
+            )
 
     # assign base learning rate to the remaining unused parameters (exclude frozen ones)
     other_params = [p for p in model.parameters() if id(p) not in used_params and id(p) not in frozen_params]
