@@ -1,0 +1,93 @@
+run_id: gt_behavior_skill_easy_qwen35_2b_size_proportional_dropout0_300k
+run_root_dir: ./results/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+framework:
+  name: QwenPI_v3
+  qwenvl:
+    # 模型尺寸消融: 2B(text hidden=2048)对 0.8B(text hidden=1024)。同族 Qwen3.5, 走同一 QWen3_5 接口。
+    # 注意: 入口脚本默认不再覆盖 base_vlm(只有显式 BASE_VLM=... 才覆盖), 故此处的 2B 路径会真正生效。
+    base_vlm: ./playground/Pretrained_models/Qwen3.5-2B
+    attn_implementation: flash_attention_2   # 对 Qwen3.5 实为 no-op(QWen3_5.py 硬编码 sdpa), 仅占位
+    vl_hidden_dim: 2048                       # 2B 的真实 text hidden(运行时仍会从 ckpt 自动覆盖)
+    # vl_hidden_dim / num_vl_layers / project_layers(1024->1024 vs 2048->1024)均运行时按 ckpt 自动解析,
+    # action_model 各维度与 action_norm_stats 与 VLM 尺寸解耦, 无需改动。
+
+  action_model:
+    action_dim: 23
+    state_dim: 44
+    action_horizon: 30
+    repeated_diffusion_steps: 8
+    diffusion_model_cfg:
+      action_dit_hidden_dim: 1024
+      dropout: 0.0          # 本变体: 关闭 action DiT dropout(对照原 size_proportional 的 0.2)
+      final_dropout: false
+      interleave_self_attention: true
+      norm_type: ada_norm
+      positional_embeddings: null
+      attention_head_dim: 64
+
+datasets:
+  vla_data:
+    dataset_py: behavior_skill_lerobot_datasets
+    # 2B + size_proportional(按数据量): 相对 08b_size_proportional 只变 VLM 尺寸; 相对 2b_subtask_uniform 只变采样。
+    # 注意: 经 training_scripts/{single_nodes,multi_nodes}/ 入口脚本启动时此值会被脚本的 BEHAVIOR_SKILL_DATA_ROOT 覆盖
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    use_local_videos: false
+    data_mix: gt_behavior_skill_easy
+    # size_proportional(按数据量): 各 skill_subtask 按其数据量占比采样(balance_dataset_weights: true), 对照 subtask_uniform 的等概率(1/34)。
+    balance_dataset_weights: true
+    balance_trajectory_weights: true
+    include_source_span_names: []
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
+    # 公平对比: 保持 per_device_batch_size=16(global batch 与 0.8B 一致)。2B 权重约 2.6x,
+    #   显存更高; 若单卡 OOM, 优先开 gradient checkpointing 或 (per_device_batch_size=8 + grad_accum=2)
+    #   以「保持有效 batch=128 不变」的方式降显存, 不要直接砍 batch 而改变了对比口径。
+    per_device_batch_size: 16
+    video_backend: decord
+    num_workers: 16
+    prefetch_factor: 4
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  repeated_diffusion_steps: 8
+  max_train_steps: 300000   # 本变体: 300k(对照原 size_proportional 的 150k)
+  num_warmup_steps: 5000
+  save_interval: 2500
+  eval_interval: 100
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
