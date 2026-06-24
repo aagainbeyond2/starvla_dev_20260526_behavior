@@ -1,4 +1,4 @@
-run_id: gt_behavior_skill_easy_qwen35_2b_size_proportional
+run_id: gt_behavior_skill_easy_qwen35_2b_size_proportional_using_easy_norm_stats
 run_root_dir: ./results/Checkpoints
 logging_backend: tensorboard
 seed: 42
@@ -50,7 +50,7 @@ datasets:
       - action.torso
       - action.left_arm
       - action.right_arm
-    action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
+    action_norm_stats_path: examples/Behavior-Skill-GT/norm_stats_easy.json
     # 公平对比: 保持 per_device_batch_size=16(global batch 与 0.8B 一致)。2B 权重约 2.6x,
     #   显存更高; 若单卡 OOM, 优先开 gradient checkpointing 或 (per_device_batch_size=8 + grad_accum=2)
     #   以「保持有效 batch=128 不变」的方式降显存, 不要直接砍 batch 而改变了对比口径。

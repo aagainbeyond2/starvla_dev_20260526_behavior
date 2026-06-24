@@ -66,7 +66,7 @@ datasets:
       - action.torso
       - action.left_arm
       - action.right_arm
-    action_norm_stats_path: examples/Behavior-Skill/behavior1k_norm_stats.json
+    action_norm_stats_path: examples/Behavior-Skill-GT/norm_stats_easy.json
     per_device_batch_size: 16
     video_backend: decord  # 实测: 与 torchvision_av 训练速度相同(s/it~2.7, data_times~0解码被prefetch掩盖), 但 torchvision_av 泄漏主机RAM、decord 恒定~1.56G/worker -> 用 decord
     # DataLoader 资源: num_workers 是每个 rank 的, 8 卡总 worker = ×8。RAM 泄露真因是 video_backend(已 -> decord),与此无关,故恢复原默认 16/4
