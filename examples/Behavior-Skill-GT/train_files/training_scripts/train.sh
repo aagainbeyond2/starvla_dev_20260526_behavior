@@ -58,7 +58,10 @@ echo "[train] python = $(which python)"
 OVR_ARGS=()
 [ -n "${STEPS:-}" ]         && OVR_ARGS+=(--trainer.max_train_steps "$STEPS")
 [ -n "${SAVE_INTERVAL:-}" ] && OVR_ARGS+=(--trainer.save_interval "$SAVE_INTERVAL")
-echo "[train] steps  = ${STEPS:-yaml默认(150000)}   save_interval = ${SAVE_INTERVAL:-yaml默认(2500)}"
+# framework: 默认走 yaml 的 framework.name(PI 配置=QwenPI_v3, OFT 配置=QwenOFT); FRAMEWORK env 可显式覆盖。
+#   注意: 早期这里硬编码过 --framework.name QwenPI_v3, 会静默把 OFT 配置也跑成 PI(DiT head)。已删。
+[ -n "${FRAMEWORK:-}" ]     && OVR_ARGS+=(--framework.name "$FRAMEWORK")
+echo "[train] steps  = ${STEPS:-yaml默认(150000)}   save_interval = ${SAVE_INTERVAL:-yaml默认(2500)}   framework = ${FRAMEWORK:-yaml里的 framework.name}"
 
 # 5) 日志: 同时打屏 + 落盘到输出目录(train_<时间戳>.log, 与 checkpoint/tensorboard 同目录)
 OUTDIR="${RUN_ROOT_DIR}/${RUN_ID}"; mkdir -p "$OUTDIR"
@@ -72,7 +75,6 @@ accelerate launch \
   --num_processes "${NUM_PROCESSES:-8}" \
   starVLA/training/train_starvla.py \
   --config_yaml "$CFG" \
-  --framework.name QwenPI_v3 \
   --datasets.vla_data.data_root_dir "$DATA_ROOT" \
   --logging_backend tensorboard \
   --run_root_dir "$RUN_ROOT_DIR" \
