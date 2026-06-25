@@ -32,6 +32,20 @@ from starVLA.dataloader.gr00t_lerobot.datasets import (
 from starVLA.dataloader.gr00t_lerobot.video import get_frames_by_timestamps
 
 
+# Behavior_Skill_V1.0 已知坏 parquet(128KB 截断, 14万段里唯一一个):
+#   hard/wipe/wipe_the_trumpet/data/episode_03700117.parquet
+# 按 (subtask 目录名, episode_index) 匹配, 在 get_trajectory_ids 里跳过该 ep ->
+# 它永不进采样池、永不被 __getitem__ 读到; 该段其余 199 个 ep 照常训练。
+_BAD_EPISODES = {("wipe_the_trumpet", 3700117)}
+
+
+def _is_bad_episode(dataset_path: Path, episode_index) -> bool:
+    try:
+        return (Path(dataset_path).name, int(episode_index)) in _BAD_EPISODES
+    except (TypeError, ValueError):
+        return False
+
+
 def _resolve_repo_relative_path(path_str: str) -> Path:
     path = Path(path_str)
     if path.is_absolute():
@@ -313,6 +327,8 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
                     )
                 ):
                     continue
+                if _is_bad_episode(self.dataset_path, episode["episode_index"]):
+                    continue   # 跳过已知坏 parquet 对应的 ep(见 _BAD_EPISODES)
                 trajectory_ids.append(episode["episode_index"])
                 trajectory_lengths.append(episode["length"])
             if allowed_source_span_names is not None:
@@ -335,6 +351,8 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
                     if str(c).startswith("videos/") and str(c).endswith("/from_timestamp")
                 ]
                 for index, episode in episodes_data.iterrows():
+                    if _is_bad_episode(self.dataset_path, episode["episode_index"]):
+                        continue   # 防御性: v3.0 路径同样跳过坏 ep(见 _BAD_EPISODES)
                     trajectory_ids.append(episode["episode_index"])
                     trajectory_lengths.append(episode["length"])
                     from_timestamps = {}

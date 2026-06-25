@@ -217,3 +217,14 @@ DATASET_NAMED_MIXTURES = {
         ("turn_on_switch/turn_on_the_washer_switch", 1.0, "R1ProSkill"),
     ],
 }
+
+# 全量混采 gt_behavior_skill_full(471 subtask = easy 34 + normal 169 + hard 268, ~14万 ep)。
+# 由 gen_full_mixture.py 扫目录生成的 gt_behavior_skill_full.json 注册(避免 471 行硬编码;改数据重跑 gen)。
+# name 三级 <difficulty>/<skill_type>/<skill_subtask>, 配置里 data_root_dir 指 Behavior_Skill_V1.0 父目录。
+# 坏 episode(wipe_the_trumpet/03700117)整段保留, 坏帧在 loader(_BAD_EPISODES)按 episode_index 跳过。
+import json as _json, os as _os  # noqa: E402
+_full_json = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "gt_behavior_skill_full.json")
+if _os.path.exists(_full_json):
+    DATASET_NAMED_MIXTURES["gt_behavior_skill_full"] = [
+        tuple(x) for x in _json.load(open(_full_json, encoding="utf-8"))
+    ]

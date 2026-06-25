@@ -144,3 +144,34 @@ STEPS=300000 SAVE_INTERVAL=5000 bash train.sh 2b_size
 6. `accelerate launch` DeepSpeed ZeRO-2 跑 `starVLA/training/train_starvla.py`,`tee` 落盘日志。
 
 > 切配置只换短名,**别把 config 当某个内层脚本的位置参数传**——历史坑:旧的 `single_nodes/run_..._singlenode.sh` 只认 `CONFIG_YAML` 环境变量、会静默无视位置参数、跑默认 0.8B 基线(白跑过一次 91h)。现在这两个扁平脚本直接读短名,不再有这个坑。
+
+---
+
+## 全量数据训练(easy+normal+hard, 471 subtask / 75.4M 帧)
+
+全量配置(2B / size_proportional / dropout0 / `norm_stats_full.json` / 300k steps ≈ 2 epoch @ 4机×8卡):
+- **PI**:`train_gt_behavior_skill_full_qwen35_2b_size_proportional_dropout0.yaml`
+- **OFT**:`train_gt_behavior_skill_full_qwenoft_2b_size_proportional_dropout0.yaml`(QwenOFT MLP/L1 head)
+
+依赖改动:`data_registry/gen_full_mixture.py` 生成 `gt_behavior_skill_full.json`(471)→ data_config 注册 mix `gt_behavior_skill_full`;`behavior_skill_dataset.py` 的 `_BAD_EPISODES` 跳过坏 parquet `wipe_the_trumpet/episode_3700117`。
+
+**⚠️ 必须把 `DATA_ROOT` 覆盖成父目录**(全量 mix name 是三级 `<diff>/<type>/<subtask>`,入口脚本默认 DATA_ROOT 指 `/easy` 会只跑 easy):
+```
+DATA_ROOT=/nfs/AIGC/weiguoting/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0
+```
+
+**先单机冒烟**(强烈建议,尤其 OFT 是 QwenOFT+behavior 首次组合):
+```bash
+DATA_ROOT=.../Behavior_Skill_V1.0 STEPS=200 \
+  bash examples/Behavior-Skill-GT/train_files/training_scripts/train.sh \
+    train_gt_behavior_skill_full_qwen35_2b_size_proportional_dropout0.yaml   # 或 ..._qwenoft_...
+```
+看:471 subtask 加载不崩、坏 ep 被跳(warning)、`Loaded external action norm stats from .../norm_stats_full.json`、loss 非 NaN。
+
+**4 机正式训**(每台一个 pod,平台注入 `PET_*`):
+```bash
+DATA_ROOT=.../Behavior_Skill_V1.0 \
+  bash examples/Behavior-Skill-GT/train_files/training_scripts/train_multinode.sh \
+    train_gt_behavior_skill_full_qwen35_2b_size_proportional_dropout0.yaml
+```
+全局 batch = 16 × 32 = 512;OFT 换成 `..._qwenoft_...` 那个 config。

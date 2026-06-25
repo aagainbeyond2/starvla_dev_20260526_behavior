@@ -1,0 +1,78 @@
+run_id: gt_behavior_skill_full_qwenoft_2b_size_proportional_dropout0
+run_root_dir: ./results/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+# starVLA-OFT(QwenOFT): Qwen-VL backbone + MLP 回归 action head(L1),对照 PI(QwenPI_v3 扩散 head)。
+# QwenOFT 与 QwenPI 共用 get_vlm_model -> 可挂 Qwen3.5-2B(与 PI 对齐);action_hidden_dim 运行时按 VLM 自动取。
+# MLP head 无 dropout 参 -> "dropout=0" 即默认, 不设该字段。
+framework:
+  name: QwenOFT
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/Qwen3.5-2B
+    attn_implementation: flash_attention_2
+  action_model:
+    action_model_type: MLP
+    action_dim: 23
+    state_dim: 44
+    action_horizon: 30          # chunk 长度(唯一真值); future/past 为兼容别名
+    future_action_window_size: 29
+    past_action_window_size: 0
+
+datasets:
+  vla_data:
+    # 数据段与 PI 全量【完全一致】(同一份 behavior-skill 数据/mix/norm_stats/动作口径), 只换 framework。
+    dataset_py: behavior_skill_lerobot_datasets
+    # ★ data_root_dir 指 Behavior_Skill_V1.0 【父目录】(mix name 三级); 入口脚本用 DATA_ROOT 覆盖
+    #   -> 跑全量务必 DATA_ROOT=.../Behavior_Skill_V1.0(不是 /easy)。
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    use_local_videos: false
+    data_mix: gt_behavior_skill_full
+    balance_dataset_weights: true      # size_proportional
+    balance_trajectory_weights: true
+    include_source_span_names: []
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    action_norm_stats_path: examples/Behavior-Skill-GT/norm_stats_full.json
+    per_device_batch_size: 16          # 4机×8卡=32卡 -> 全局 batch 512
+    video_backend: decord
+    num_workers: 16
+    prefetch_factor: 4
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  # 全量 ≈2 epoch @ 32卡(全局 batch 512): 75.4M 帧 ×2 / 512 ≈ 294k -> 取 300000。
+  max_train_steps: 300000
+  num_warmup_steps: 5000
+  save_interval: 5000
+  eval_interval: 100
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  freeze_modules: ''
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  max_grad_norm: 1.0
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 1
