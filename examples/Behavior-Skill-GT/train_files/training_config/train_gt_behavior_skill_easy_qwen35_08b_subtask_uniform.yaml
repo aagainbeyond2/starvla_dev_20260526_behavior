@@ -51,7 +51,7 @@ datasets:
     # 源视频直读: 跳过切段mp4, 按parquet的source_episode_index/source_timestamp直接读原始behavior-1k视频(无损像素)。
     source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
     # 开关: true=读各subtask自己videos/下的切段(忽略上面的source_video_root); false=直读behavior-1k原始视频
-    use_local_videos: false
+    use_local_videos: true   # 直接读 Behavior_Skill_V1.0/<subtask>/videos/ 本地切段 RGB(忽略 source_video_root, 自包含)
     data_mix: gt_behavior_skill_easy
     # 采样策略[subtask_uniform]: balance_dataset_weights=false
     #   -> 34 个 skill_subtask 各 1/34 等概率(与 episode 数无关)。

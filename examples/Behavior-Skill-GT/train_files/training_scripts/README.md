@@ -149,7 +149,7 @@ STEPS=300000 SAVE_INTERVAL=5000 bash train.sh 2b_size
 
 ## 全量数据训练(easy+normal+hard, 471 subtask / 75.4M 帧)
 
-全量配置(2B / size_proportional / dropout0 / `norm_stats_full.json` / 300k steps ≈ 2 epoch @ 4机×8卡):
+全量配置(2B / size_proportional / dropout0 / `norm_stats_full.json` / **750k steps ≈ 5 epoch** @ 4机×8卡, save_interval 10000):
 - **PI**:`train_gt_behavior_skill_full_qwen35_2b_size_proportional_dropout0.yaml`
 - **OFT**:`train_gt_behavior_skill_full_qwenoft_2b_size_proportional_dropout0.yaml`(QwenOFT MLP/L1 head)
 

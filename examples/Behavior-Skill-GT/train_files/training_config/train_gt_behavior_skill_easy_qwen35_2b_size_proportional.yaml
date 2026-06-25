@@ -39,7 +39,7 @@ datasets:
     # 注意: 经 training_scripts/{single_nodes,multi_nodes}/ 入口脚本启动时此值会被脚本的 BEHAVIOR_SKILL_DATA_ROOT 覆盖
     data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
     source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
-    use_local_videos: false
+    use_local_videos: true   # 直接读 Behavior_Skill_V1.0/<subtask>/videos/ 本地切段 RGB(忽略 source_video_root, 自包含)
     data_mix: gt_behavior_skill_easy
     # size_proportional(按数据量): 各 skill_subtask 按其数据量占比采样(balance_dataset_weights: true), 对照 subtask_uniform 的等概率(1/34)。
     balance_dataset_weights: true

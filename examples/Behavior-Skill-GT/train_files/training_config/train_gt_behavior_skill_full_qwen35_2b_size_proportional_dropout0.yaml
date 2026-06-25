@@ -37,7 +37,7 @@ datasets:
     #   入口脚本会用 DATA_ROOT 覆盖此值 -> 跑全量时务必 DATA_ROOT=.../Behavior_Skill_V1.0(不是 /easy)。
     data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0
     source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
-    use_local_videos: false
+    use_local_videos: true   # 直接读 Behavior_Skill_V1.0/<subtask>/videos/ 本地切段 RGB(忽略上面 source_video_root, 自包含、不依赖 behavior-1k_demo)
     data_mix: gt_behavior_skill_full
     # size_proportional: 各 skill_subtask 按数据量占比采样(balance_dataset_weights: true), 对照 subtask_uniform 的等概率(1/471)。
     balance_dataset_weights: true
@@ -65,10 +65,10 @@ datasets:
 
 trainer:
   repeated_diffusion_steps: 8
-  # 全量 ≈2 epoch @ 4机×8卡=32卡(全局 batch 512): 75.4M 帧 ×2 / 512 ≈ 294k -> 取 300000。
-  max_train_steps: 300000
+  # 全量 ≈5 epoch @ 4机×8卡=32卡(全局 batch 512): 75.4M 帧 ×5 / 512 ≈ 737k -> 取 750000。
+  max_train_steps: 750000
   num_warmup_steps: 5000
-  save_interval: 5000        # 300k/5000 = 60 个 ckpt
+  save_interval: 10000       # 750k/10000 = 75 个 ckpt(2B 单 ckpt 大, 别用 5000=150个 撑爆盘)
   eval_interval: 100
   learning_rate:
     base: 2.5e-05
