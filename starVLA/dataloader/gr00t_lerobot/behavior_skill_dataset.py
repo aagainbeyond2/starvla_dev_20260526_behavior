@@ -246,14 +246,23 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
             le_video_meta = le_info["features"][original_key]
             height = le_video_meta["shape"][le_video_meta["names"].index("height")]
             width = le_video_meta["shape"][le_video_meta["names"].index("width")]
-            # use_local_videos: 读各 subtask 自己 videos/ 下的本地切段(已降采样到训练分辨率, 全 224×224),
-            # 与 info.json 声明的源分辨率(head 720 / 腕 480)不符 -> 把 resolution 覆盖成本地实际值
-            # (取 default_image_resolution, 默认 224), 否则 VideoToTensor 按 720/480 校验直接崩。
-            # 源直读(use_local_videos=false)不覆盖, 仍用 info.json 的 720/480。
+            # use_local_videos: 读各 subtask 自己 videos/ 下的本地视频。本地文件实际分辨率因部署而异
+            # (可能是全分辨率 720/480, 也可能被 v5 瘦身降采样到 224 切段), 不一定 = info.json 声明值。
+            # -> 探测第一个本地视频文件的真实分辨率, 让 VideoToTensor 校验对得上; 探测失败保留 info.json 值。
+            # 源直读(use_local_videos=false)不探测, 仍用 info.json 的 720/480。
             if self.data_cfg and self.data_cfg.get("use_local_videos", False):
-                _ir = self.data_cfg.get("default_image_resolution", [3, 224, 224])
-                height = int(_ir[1]) if len(_ir) >= 2 else 224
-                width = int(_ir[2]) if len(_ir) >= 3 else 224
+                try:
+                    import glob as _glob
+                    _first = next(_glob.iglob(
+                        str(self.dataset_path / "videos" / "**" / original_key / "*.mp4"),
+                        recursive=True,
+                    ), None)
+                    if _first is not None:
+                        import decord as _decord
+                        _shape = _decord.VideoReader(_first, num_threads=1)[0].shape
+                        height, width = int(_shape[0]), int(_shape[1])
+                except Exception:
+                    pass
             try:
                 channels = le_video_meta["shape"][le_video_meta["names"].index("channel")]
                 fps = le_video_meta["video_info"]["video.fps"]
