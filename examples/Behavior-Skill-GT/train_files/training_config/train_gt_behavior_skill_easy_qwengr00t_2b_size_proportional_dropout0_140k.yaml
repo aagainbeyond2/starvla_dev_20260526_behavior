@@ -1,0 +1,93 @@
+run_id: gt_behavior_skill_easy_qwengr00t_2b_size_proportional_dropout0_140k
+run_root_dir: ./results/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+# QwenGR00T: Qwen3.5-2B backbone + GR00T N1.5 流匹配 DiT 头(对照 QwenPI_v3 扩散头 / QwenOFT MLP 头)。
+# 与 easy 140k 系列(qwenoft/qwen35)完全同数据同 trainer, 只换 framework。
+# 数据读取沿用原有 decord 时间戳匹配路径。
+# 未显式写的 action_model 字段走 QwenGR00TDefaultConfig 默认值
+# (DiT-B 16 层/hidden 1024/num_inference_timesteps 4/noise schedule 等)。
+framework:
+  name: QwenGR00T
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/Qwen3.5-2B
+    attn_implementation: flash_attention_2
+    vl_hidden_dim: 2048                       # 2B 真实 text hidden(cross_attention 对齐运行时自动)
+
+  action_model:
+    action_model_type: DiT-B
+    action_dim: 23
+    state_dim: 44
+    action_horizon: 30
+    repeated_diffusion_steps: 8
+    diffusion_model_cfg:
+      cross_attention_dim: 2048               # 与 VLM hidden 对齐(运行时仍会自动确认)
+      dropout: 0.0          # dropout0 变体(默认是 0.2/true, 这里对齐系列口径关掉)
+      final_dropout: false
+      interleave_self_attention: true
+      norm_type: ada_norm
+      num_layers: 16
+      output_dim: 1024
+      positional_embeddings: null
+
+datasets:
+  vla_data:
+    dataset_py: behavior_skill_lerobot_datasets
+    # ★ easy mix 名是两级 <skill_type>/<skill_subtask> -> data_root_dir 指 V1.0/easy。
+    #   入口脚本用 DATA_ROOT 覆盖此值。
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    use_local_videos: true   # 直接读 V1.0/easy/<subtask>/videos/ 本地切段 RGB(自包含)
+    data_mix: gt_behavior_skill_easy
+    balance_dataset_weights: true      # size_proportional
+    balance_trajectory_weights: true
+    include_source_span_names: []
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    action_norm_stats_path: examples/Behavior-Skill-GT/norm_stats_easy.json
+    per_device_batch_size: 16          # 2机×8卡=16卡 -> 全局 batch 256
+    video_backend: decord
+    num_workers: 16
+    prefetch_factor: 4
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  repeated_diffusion_steps: 8
+  # easy ≈5 epoch @ 2机×8卡=16卡(全局 batch 256): 7.0M 帧 ×5 / 256 ≈ 136.9k -> 取 140000。
+  max_train_steps: 140000
+  num_warmup_steps: 5000
+  save_interval: 5000        # 28 个 ckpt
+  eval_interval: 200
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
