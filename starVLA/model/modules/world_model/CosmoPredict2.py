@@ -20,10 +20,11 @@ Key difference from VLM wrappers:
     that does not depend on VLM-specific naming conventions.
 """
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
+from PIL import Image
 
 from starVLA.training.trainer_utils import initialize_overwatch
 
@@ -90,6 +91,29 @@ class _CosmoPredict2_Interface(nn.Module):
         self.vae_scale_factor_temporal = 2 ** sum(self.vae.temperal_downsample)
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
+        # Observation resolution for the (single) composed multi-view frame.
+        # Route A: multiple camera views are tiled into ONE frame (see _encode_images),
+        # so they are encoded as a single video timestep instead of a fake 3-frame clip.
+        # Configurable via world_model.obs_resolution: [height, width].
+        # 480x832 is the Cosmos-Predict2 pretrained resolution; spatial dims must be
+        # multiples of vae_scale_factor_spatial. Default keeps ~16:9 to save VRAM.
+        obs_res = wm_cfg.get("obs_resolution", [320, 576])
+        self._obs_height = self._round_to_multiple(int(obs_res[0]), self.vae_scale_factor_spatial)
+        self._obs_width = self._round_to_multiple(int(obs_res[1]), self.vae_scale_factor_spatial)
+
+        # How multiple camera views are fed to the DiT backbone:
+        #   - "tile"  (default): tile all views side-by-side into ONE composed frame,
+        #     encode it as a single observation -> features [B, N, D].
+        #   - "batch": treat each view as its own batch element, encode all views in a
+        #     single DiT pass, then concatenate the per-view features along the TOKEN
+        #     axis -> features [B, num_views * N, D]. Token count (and VRAM) scale with
+        #     the number of views, since each view is encoded at full obs_resolution.
+        self._view_fusion = str(wm_cfg.get("view_fusion", "tile")).lower()
+        if self._view_fusion not in ("tile", "batch"):
+            raise ValueError(
+                f"world_model.view_fusion must be 'tile' or 'batch', got '{self._view_fusion}'."
+            )
+
         # Freeze VAE and text encoder by default
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
@@ -123,6 +147,61 @@ class _CosmoPredict2_Interface(nn.Module):
         shim.config = self._model_config
         return shim
 
+    @staticmethod
+    def _round_to_multiple(value: int, multiple: int) -> int:
+        """Round value to the nearest positive multiple of `multiple` (VAE-friendly)."""
+        if multiple <= 1:
+            return max(1, value)
+        return max(multiple, int(round(value / multiple)) * multiple)
+
+    @staticmethod
+    def _letterbox(img: Image.Image, target_h: int, target_w: int) -> Image.Image:
+        """Aspect-ratio-preserving resize + center pad (letterbox).
+
+        Scales `img` to fit inside (target_h, target_w) without distorting the
+        aspect ratio, then pads the remaining border with black. This replaces
+        the previous force-resize-to-square behaviour that stretched the image.
+        """
+        img = img.convert("RGB")
+        src_w, src_h = img.size
+        if src_w == 0 or src_h == 0:
+            return Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        scale = min(target_w / src_w, target_h / src_h)
+        new_w = max(1, int(round(src_w * scale)))
+        new_h = max(1, int(round(src_h * scale)))
+        resized = img.resize((new_w, new_h), Image.BILINEAR)
+        canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        canvas.paste(resized, ((target_w - new_w) // 2, (target_h - new_h) // 2))
+        return canvas
+
+    def _compose_views_single_frame(
+        self, views: Sequence[Image.Image], target_h: int, target_w: int
+    ) -> Image.Image:
+        """Tile multiple camera views horizontally into a SINGLE frame.
+
+        Route A: instead of stacking views along the temporal axis (which the
+        VAE would compress and treat as motion), we lay them out side-by-side in
+        the spatial dimension so all views survive as one observation timestep.
+        Each view is letterboxed into its tile to preserve aspect ratio.
+        """
+        views = [v for v in views]
+        num_views = len(views)
+        if num_views == 0:
+            return Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        if num_views == 1:
+            return self._letterbox(views[0], target_h, target_w)
+
+        base_tile_w = target_w // num_views
+        canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+        x_offset = 0
+        for i, view in enumerate(views):
+            # Give the last tile any remainder pixels so the row fills target_w exactly.
+            tile_w = base_tile_w if i < num_views - 1 else target_w - base_tile_w * (num_views - 1)
+            tile = self._letterbox(view, target_h, tile_w)
+            canvas.paste(tile, (x_offset, 0))
+            x_offset += tile_w
+        return canvas
+
     def _register_hooks(self):
         """Register forward hooks on selected transformer blocks."""
         for hook in self._hooks:
@@ -145,6 +224,51 @@ class _CosmoPredict2_Interface(nn.Module):
         else:
             self._intermediate_features.append(output)
 
+    @staticmethod
+    def _merge_views(feat: torch.Tensor, num_views: int) -> torch.Tensor:
+        """Concatenate per-view features along the token axis.
+
+        In "batch" view fusion the DiT runs on a sample-major flattened batch of
+        shape [B * num_views, N, D]. This regroups the views per sample and
+        concatenates them along the token dimension -> [B, num_views * N, D].
+        For num_views == 1 (tile fusion) the tensor is returned unchanged.
+        """
+        if num_views <= 1:
+            return feat
+        bv, n_tokens, hidden = feat.shape
+        if bv % num_views != 0:
+            raise ValueError(
+                f"_merge_views expected a sample-major batch of B*num_views rows, "
+                f"but got batch={bv} which is not divisible by num_views={num_views}."
+            )
+        b = bv // num_views
+        # [B*V, N, D] -> [B, V, N, D] -> [B, V*N, D] (view order preserved)
+        return feat.reshape(b, num_views * n_tokens, hidden)
+
+    @classmethod
+    def _to_merged_tokens(cls, feat: torch.Tensor, num_views: int) -> torch.Tensor:
+        """Normalize a raw DiT block output into merged per-view token features.
+
+        This is the single source of truth for turning a captured backbone block
+        output into the `[B, num_views * N, D]` representation the action heads
+        expect. It performs two steps:
+
+          1. Token-flatten: a 5D DiT activation `[B_eff, C, T, H, W]` is permuted
+             to `[B_eff, T*H*W, C]`. Already-tokenized `[B_eff, N, D]` outputs are
+             passed through unchanged.
+          2. View-merge: in `view_fusion="batch"` the sample-major batch
+             `[B*V, N, D]` is regrouped to `[B, V*N, D]` (token-axis concat). For
+             `num_views == 1` (tile fusion) this is a no-op.
+
+        Any consumer of the backbone features (single-layer GR00T/OFT *and* the
+        layerwise PI head) must route through this method so they all agree on the
+        `[B, V*N, D]` contract.
+        """
+        if feat.dim() == 5:
+            b_eff, c, t, h, w = feat.shape
+            feat = feat.permute(0, 2, 3, 4, 1).reshape(b_eff, t * h * w, c)
+        return cls._merge_views(feat, num_views)
+
     def _encode_text(self, instructions, max_length=512):
         """Encode text instructions using T5."""
         device = next(self.text_encoder.parameters()).device
@@ -165,68 +289,82 @@ class _CosmoPredict2_Interface(nn.Module):
         return text_embeds, text_inputs.attention_mask
 
     def _encode_images(self, images, num_frames=None):
-        """Encode observation images through VAE to get latent tokens.
+        """Encode observation images through the VAE to get latent tokens.
 
-        Follows the Cosmos pipeline approach: pad images to uniform frame count
-        with last-frame repetition, then VAE-encode the whole video.
+        Two multi-view fusion strategies are supported (world_model.view_fusion):
+
+        - "tile" (default): the per-sample camera views are tiled side-by-side into
+          ONE composed frame (see _compose_views_single_frame) with aspect-preserving
+          letterbox padding, then VAE-encoded as a single observation timestep. The
+          views are NOT mistaken for temporal motion and there is no aspect distortion.
+          Effective batch == B, num_views == 1.
+
+        - "batch": each camera view is letterboxed to the full obs_resolution and
+          encoded as its OWN batch element. The flattened batch is laid out
+          sample-major ([s0v0, s0v1, ..., s1v0, ...]) so the per-view features can be
+          regrouped and concatenated along the token axis later. Effective batch ==
+          B * num_views.
 
         Args:
-            images: List of List of PIL Images [B, [imgs...]]
-            num_frames: If given, pad/truncate to this exact count.
-                If None (default), pad to the max frame count in the batch.
-                VAE temporal factor is 4, so T_latent = (num_frames-1)//4+1.
+            images: List (batch) of per-sample views. Each element is a list of
+                PIL Images (one per camera view), or a single PIL Image.
+            num_frames: Kept for API compatibility; unused (every view/frame is
+                encoded as exactly one observation timestep).
 
         Returns:
-            latents: [B, C, T_latent, H/8, W/8] video latent tensor
-            cond_frame_counts: list[int], real frame count per sample (before padding)
+            latents: [B_eff, C, T_latent, H/8, W/8] video latent tensor (T_latent == 1),
+                where B_eff == B (tile) or B * num_views (batch)
+            cond_frame_counts: list[int], all 1 (single observation frame per element)
+            num_views: int, number of views fused per sample (1 for "tile")
         """
         device = next(self.vae.parameters()).device
         dtype = self.vae.dtype
-        # 480×832 is the pretrained resolution; spatial dims must be multiples of 16.
-        # Smaller sizes (e.g. 224×224) technically work but hurt quality due to positional embedding mismatch.
-        # If saving VRAM, keep ~16:9 aspect ratio: 256×448 or 320×576.
-        height, width = 320, 576
+        height, width = self._obs_height, self._obs_width
 
-        # First pass: preprocess each sample, record real frame counts
-        preprocessed = []
-        cond_frame_counts = []
-        for sample_imgs in images:
-            if not isinstance(sample_imgs, (list, tuple)):
-                sample_imgs = [sample_imgs]
-
-            video_tensor = self.video_processor.preprocess_video(sample_imgs, height=height, width=width)
-            video_tensor = video_tensor.to(device=device, dtype=dtype)  # [1, C, n_imgs, H, W]
-            preprocessed.append(video_tensor)
-            cond_frame_counts.append(video_tensor.shape[2])
-
-        # Determine target frame count: use num_frames if specified, otherwise batch max
-        # Ensure at least 1 frame (VAE needs T >= 1)
-        if num_frames is None:
-            target_frames = max(cond_frame_counts)
-        else:
-            target_frames = num_frames
-
-        # Second pass: truncate or pad each sample to target_frames
         batch_videos = []
-        for i, video_tensor in enumerate(preprocessed):
-            n = video_tensor.shape[2]
-            if n > target_frames:
-                video_tensor = video_tensor[:, :, :target_frames]
-                cond_frame_counts[i] = target_frames
-            elif n < target_frames:
-                # Pad with last-frame repetition (matches official pipeline)
-                last_frame = video_tensor[:, :, -1:]
-                padding = last_frame.repeat(1, 1, target_frames - n, 1, 1)
-                video_tensor = torch.cat([video_tensor, padding], dim=2)
-            batch_videos.append(video_tensor.squeeze(0))  # [C, target_frames, H, W]
+        if self._view_fusion == "batch":
+            # Each view -> one batch element, letterboxed to full resolution.
+            num_views = None
+            for sample_imgs in images:
+                if not isinstance(sample_imgs, (list, tuple)):
+                    sample_imgs = [sample_imgs]
+                sample_imgs = list(sample_imgs)
+                if num_views is None:
+                    num_views = len(sample_imgs)
+                elif len(sample_imgs) != num_views:
+                    raise ValueError(
+                        "view_fusion='batch' requires a consistent number of views per "
+                        f"sample; got {len(sample_imgs)} vs {num_views}."
+                    )
+                for view in sample_imgs:
+                    frame = self._letterbox(view, height, width)
+                    video_tensor = self.video_processor.preprocess_video([frame], height=height, width=width)
+                    video_tensor = video_tensor.to(device=device, dtype=dtype)  # [1, C, 1, H, W]
+                    batch_videos.append(video_tensor.squeeze(0))  # [C, 1, H, W]
+            num_views = num_views or 1
+        else:
+            # Compose each sample's views into a single letterboxed frame, then
+            # preprocess (normalize to [-1, 1]); the composed frame is already at the
+            # target resolution so preprocess_video does not resize/stretch it.
+            num_views = 1
+            for sample_imgs in images:
+                if not isinstance(sample_imgs, (list, tuple)):
+                    sample_imgs = [sample_imgs]
 
-        # Stack to [B, C, target_frames, H, W]
+                composed = self._compose_views_single_frame(sample_imgs, height, width)
+                video_tensor = self.video_processor.preprocess_video([composed], height=height, width=width)
+                video_tensor = video_tensor.to(device=device, dtype=dtype)  # [1, C, 1, H, W]
+                batch_videos.append(video_tensor.squeeze(0))  # [C, 1, H, W]
+
+        # Single observation frame per batch element.
+        cond_frame_counts = [1] * len(batch_videos)
+
+        # Stack to [B_eff, C, 1, H, W]
         video = torch.stack(batch_videos, dim=0)
 
         with torch.no_grad():
-            # T_latent = temporal latent frames = (num_frames-1)//4+1  (VAE temporal downsample factor=4)
-            # e.g. 5 frames → 2 latent frames, 9 frames → 3 latent frames
-            latents = self.vae.encode(video).latent_dist.sample()  # [B, 16, T_latent, H/8, W/8]
+            # Single composed frame -> T_latent = (1-1)//temporal+1 = 1 latent timestep.
+            latents = self.vae.encode(video).latent_dist.sample()  # [B, 16, 1, H/8, W/8]
 
         # Normalize latents (matches official pipeline: prepare_latents) # TODO check if this normalization is actually needed
         if self.vae.config.latents_mean is not None:
@@ -243,7 +381,8 @@ class _CosmoPredict2_Interface(nn.Module):
             sigma_data = self.scheduler.config.sigma_data
             latents = (latents - latents_mean) / latents_std * sigma_data
 
-        return latents, cond_frame_counts # latents: [B, C, T_latent, H/8, W/8], cond_frame_counts: list[int]
+        # latents: [B_eff, C, T_latent, H/8, W/8]; cond_frame_counts: list[int]; num_views: int
+        return latents, cond_frame_counts, num_views
 
     def build_inputs(self, images, instructions, **kwargs):
         """Build inputs for the DiT world model.
@@ -264,7 +403,13 @@ class _CosmoPredict2_Interface(nn.Module):
         # self.vae.to(device)
 
         text_embeds, text_mask = self._encode_text(instructions)
-        latents, cond_frame_counts = self._encode_images(images)
+        latents, cond_frame_counts, num_views = self._encode_images(images)
+
+        # In "batch" view fusion each view is its own batch element, so replicate the
+        # per-sample text conditioning to match (sample-major: s0,s0,...,s1,s1,...).
+        if num_views > 1:
+            text_embeds = text_embeds.repeat_interleave(num_views, dim=0)
+            text_mask = text_mask.repeat_interleave(num_views, dim=0)
 
         # Offload T5 and VAE to CPU to free VRAM for the transformer
         # self.text_encoder.to("cpu")
@@ -301,6 +446,7 @@ class _CosmoPredict2_Interface(nn.Module):
             "condition_mask": condition_mask,
             "padding_mask": padding_mask,
             "_is_wm_input": True,
+            "_num_views": num_views,
         }
 
     def forward(self, **kwargs):
@@ -312,6 +458,7 @@ class _CosmoPredict2_Interface(nn.Module):
         is_wm = kwargs.pop("_is_wm_input", False)
         output_hidden_states = kwargs.pop("output_hidden_states", False)
         return_dict = kwargs.pop("return_dict", True)
+        num_views = int(kwargs.pop("_num_views", 1))
         kwargs.pop("output_attentions", None)
 
         # Clear feature buffer
@@ -326,23 +473,15 @@ class _CosmoPredict2_Interface(nn.Module):
                 padding_mask=kwargs.get("padding_mask", None),
             )
 
-        # Build hidden_states tuple from captured intermediate features
-        # Also reshape from [B, C, T, H, W] to [B, N_tokens, hidden_dim]
-        extracted = []
-        for feat in self._intermediate_features:
-            if feat.dim() == 5:
-                # [B, C, T, H, W] -> [B, T*H*W, C]
-                B, C, T, H, W = feat.shape
-                feat = feat.permute(0, 2, 3, 4, 1).reshape(B, T * H * W, C)
-            extracted.append(feat)
+        # Build hidden_states tuple from captured intermediate features.
+        # `_to_merged_tokens` token-flattens (5D -> [B, N, D]) and merges per-view
+        # tokens ([B*V, N, D] -> [B, V*N, D]) so the action head sees [B, V*N, D].
+        extracted = [self._to_merged_tokens(feat, num_views) for feat in self._intermediate_features]
 
         # If no hooks fired (shouldn't happen), use transformer output
         if not extracted:
             out = dit_output.sample if hasattr(dit_output, "sample") else dit_output
-            if out.dim() == 5:
-                B, C, T, H, W = out.shape
-                out = out.permute(0, 2, 3, 4, 1).reshape(B, T * H * W, C)
-            extracted.append(out)
+            extracted.append(self._to_merged_tokens(out, num_views))
 
         # Build compatible output object
         class _WMOutput:

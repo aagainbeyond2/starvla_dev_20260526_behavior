@@ -151,6 +151,26 @@ class CosmoPredict2_PI(baseframework):
         else:
             self._all_hidden_states.append(output)
 
+    def _postprocess_layers(self, layers, num_views: int) -> List[torch.Tensor]:
+        """Normalize captured per-layer block outputs into the head's contract.
+
+        The raw forward-hook outputs are NOT post-processed by the backbone (the
+        backbone only merges the layers it taps for `extract_layers`). So in
+        `view_fusion="batch"` they are still the sample-major `[B*V, N, D]` (or a
+        5D DiT activation). We route every layer through the backbone's
+        `_to_merged_tokens`, which token-flattens and concatenates the per-view
+        tokens -> `[B, V*N, D]`, matching exactly what `CosmoPredict2GR00T`
+        consumes from `wm_outputs.hidden_states`.
+
+        Backbones that do not implement multi-view merging (e.g. Wan) expose no
+        such method; we then fall back to the raw outputs unchanged so their
+        existing behaviour is preserved.
+        """
+        postprocess = getattr(self.backbone, "_to_merged_tokens", None)
+        if postprocess is None:
+            return list(layers)
+        return [postprocess(h, num_views) for h in layers]
+
     def forward(self, examples: List[dict] = None, **kwargs) -> Tuple:
         batch_images = [example["image"] for example in examples]
         instructions = [example["lang"] for example in examples]
@@ -159,6 +179,9 @@ class CosmoPredict2_PI(baseframework):
         state = [example["state"] for example in examples] if "state" in examples[0] else None
 
         wm_inputs = self.backbone.build_inputs(images=batch_images, instructions=instructions)
+        # build_inputs reports how many views were fused per sample; the hook
+        # outputs collected below are pre-merge, so we merge them ourselves.
+        num_views = int(wm_inputs.get("_num_views", 1))
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             self._all_hidden_states.clear()
@@ -167,8 +190,8 @@ class CosmoPredict2_PI(baseframework):
                 output_hidden_states=True,
                 return_dict=True,
             )
-            # Collect all layer hidden states
-            vl_embs_list = list(self._all_hidden_states)
+            # Collect all layer hidden states, merging per-view tokens -> [B, V*N, D].
+            vl_embs_list = self._postprocess_layers(self._all_hidden_states, num_views)
             base_hidden = vl_embs_list[-1]
 
         with torch.autocast("cuda", dtype=torch.float32):
@@ -205,6 +228,7 @@ class CosmoPredict2_PI(baseframework):
             batch_images = resize_images(batch_images, target_size=train_obs_image_size)
 
         wm_inputs = self.backbone.build_inputs(images=batch_images, instructions=instructions)
+        num_views = int(wm_inputs.get("_num_views", 1))
         with torch.autocast("cuda", dtype=torch.bfloat16):
             self._all_hidden_states.clear()
             wm_outputs = self.backbone(
@@ -212,7 +236,7 @@ class CosmoPredict2_PI(baseframework):
                 output_hidden_states=True,
                 return_dict=True,
             )
-            vl_embs_list = list(self._all_hidden_states)
+            vl_embs_list = self._postprocess_layers(self._all_hidden_states, num_views)
 
         state = (
             torch.from_numpy(np.array(state)).to(vl_embs_list[-1].device, dtype=vl_embs_list[-1].dtype)

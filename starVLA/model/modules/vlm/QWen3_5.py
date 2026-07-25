@@ -58,7 +58,6 @@ class _QWen3_5_VL_Interface(nn.Module):
         model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3.5-VL-4B-Instruct")
         attn_implementation = qwenvl_config.get("attn_implementation", "sdpa")
 
-        attn_implementation = "sdpa"
         # Fallback to sdpa if flash_attention_2 is requested but flash_attn is not installed
         if attn_implementation == "flash_attention_2":
             try:
@@ -72,6 +71,7 @@ class _QWen3_5_VL_Interface(nn.Module):
             attn_implementation=attn_implementation,
             torch_dtype=torch.bfloat16,
         )
+        print(f"[QWen3_5] attention implementation: {model.config._attn_implementation}")
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
 
