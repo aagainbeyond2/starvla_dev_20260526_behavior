@@ -1,0 +1,82 @@
+run_id: gt_behavior_skill_easy_qwenoft_2b_size_proportional_dropout0_140k
+run_root_dir: ./results/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+# starVLA-OFT(QwenOFT) easy-only 版: Qwen-VL backbone + MLP 回归 action head(L1)。
+# 与 full OFT 的区别只有数据段(easy 34 subtask + easy norm_stats)
+# 与 trainer 步数(140k≈5 epoch@2机)。数据读取沿用原有 decord 时间戳匹配路径。
+framework:
+  name: QwenOFT
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/Qwen3.5-2B
+    attn_implementation: flash_attention_2
+    vl_hidden_dim: 2048                       # 2B 真实 text hidden(运行时按 ckpt 自动确认/覆盖; share_tools 用它 auto-fill)
+
+  action_model:
+    action_model_type: MLP
+    action_dim: 23
+    state_dim: 44
+    action_horizon: 30
+
+datasets:
+  vla_data:
+    dataset_py: behavior_skill_lerobot_datasets
+    # ★ easy 的 mix 名是两级 <skill_type>/<skill_subtask> -> data_root_dir 必须指 V1.0/easy
+    #   (与 full 相反, full 是三级名指 V1.0 父目录)。入口脚本用 DATA_ROOT 覆盖此值。
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    use_local_videos: true   # 直接读 Behavior_Skill_V1.0/easy/<subtask>/videos/ 本地切段 RGB(忽略 source_video_root, 自包含)
+    data_mix: gt_behavior_skill_easy
+    balance_dataset_weights: true      # size_proportional(按各 subtask 数据量占比采样)
+    balance_trajectory_weights: true
+    include_source_span_names: []
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    # easy 专用 norm_stats(challenge-demos, 与 full 那份不能混用):
+    #   仓内相对路径 = <repo>/examples/Behavior-Skill-GT/norm_stats_easy.json
+    action_norm_stats_path: examples/Behavior-Skill-GT/norm_stats_easy.json
+    per_device_batch_size: 16          # 2机×8卡=16卡 -> 全局 batch 256
+    video_backend: decord
+    num_workers: 16
+    prefetch_factor: 4
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  # easy ≈5 epoch @ 2机×8卡=16卡(全局 batch 256): 7.0M 帧 ×5 / 256 ≈ 136.9k -> 取 140000(≈5.1 epoch)。
+  max_train_steps: 140000
+  num_warmup_steps: 5000
+  save_interval: 5000        # 140k/5000 = 28 个 ckpt × ~5.2G ≈ 146G, 盘上留意
+  eval_interval: 200
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08

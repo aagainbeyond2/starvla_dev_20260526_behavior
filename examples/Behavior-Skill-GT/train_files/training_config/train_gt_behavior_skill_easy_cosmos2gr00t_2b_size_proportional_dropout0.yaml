@@ -1,0 +1,128 @@
+run_id: gt_behavior_skill_easy_cosmos2gr00t_2b_size_proportional_dropout0
+run_root_dir: ./results/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+# === WM4A: Cosmos-Predict2-2B(VAE+T5+DiT)骨干 + GR00T 流匹配头, easy-only ===
+# 移植自 yelin 的 debug_starvla_behavior_skill_easy_pickup_cosmos_predict2_2b.yaml,
+# 数据段/口径改为本系列血缘(gt_behavior_skill_easy + V1.0/easy + norm_stats_easy + decord)。
+# 数据读取沿用原有 decord 时间戳匹配路径。
+# 依赖已移植的新版 world_model/CosmoPredict2.py(view_fusion/letterbox/_to_merged_tokens)。
+#
+# ★★ 跑前必读:
+#   1. 权重待传输: 把 nvidia/Cosmos-Predict2-2B-Video2World 放到下面 base_wm 路径(两台机都要放)。
+#   2. per_device_batch_size / max_train_steps 是【占位值】, 必须先单机冒烟测显存/吞吐后重算:
+#      5 epoch 样本量 = 7.0M×5 = 35M; bs4×16卡(全局64) -> 547k 步; bs8 -> 274k 步。
+#      确定 bs 后按 35M/全局batch 改 max_train_steps, 保持与 Qwen easy 140k 系列等样本量。
+#   3. 与 Qwen 系列一致: 无状态训练(include_state: false / state_dim: 0), Qwen 系列同样从未喂 state。
+framework:
+  name: CosmoPredict2GR00T
+
+  world_model:
+    base_wm: ./playground/Pretrained_models/nvidia/Cosmos-Predict2-2B-Video2World
+    extract_layers: [-1]
+    # 多视角进 DiT 的方式: batch=每视角独立编码后按 token 轴拼接 [B,3N,D](显存×3, yelin 主线);
+    # 显存吃紧可退 tile(3 视角横排拼一帧, [B,N,D])。
+    view_fusion: batch
+    # 每帧观测送 VAE 的分辨率 [H,W](letterbox 保长宽比, 需为 VAE 空间因子倍数)。
+    # 本地切段视频是 224x224, 会被 letterbox 放大到该分辨率(Cosmos 预训练是 480x832)。
+    obs_resolution: [320, 576]
+
+  # Legacy-compat: 部分头仍读 qwenvl.vl_hidden_dim; world-model 工厂在 world_model 缺失时
+  # 回退 qwenvl.base_vlm, 故两处都指向 Cosmos 权重。
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/nvidia/Cosmos-Predict2-2B-Video2World
+    vl_hidden_dim: 2048
+
+  # --- GR00T 流匹配头(与 easy_qwengr00t 140k 同规格, dropout0 口径) ---
+  action_model:
+    action_model_type: DiT-B
+    action_dim: 23
+    state_dim: 0              # 无状态(与 Qwen 系列实际口径一致)
+    action_horizon: 30
+    action_hidden_dim: 1024
+    hidden_size: 1024
+    add_pos_embed: true
+    max_seq_len: 1024
+    repeated_diffusion_steps: 8   # 对齐 Qwen GR00T easy(yelin debug 用 4, 此处取系列口径)
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 4
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:
+      cross_attention_dim: 2048  # 运行时按 world-model hidden 自动对齐
+      action_dit_hidden_dim: 1024
+      dropout: 0.0          # dropout0 变体(yelin 原版 0.2/true)
+      final_dropout: false
+      interleave_self_attention: true
+      norm_type: ada_norm
+      num_layers: 16
+      output_dim: 1024
+      positional_embeddings: null
+      attention_head_dim: 64
+
+  # --- 备选: CosmoPredict2OFT(MLP L1 回归头) ---
+  # framework.name: CosmoPredict2OFT + action_model 换成:
+  #   {action_model_type: MLP, action_dim: 23, action_hidden_dim: 2048, action_horizon: 30, past_action_window_size: 0}
+
+datasets:
+  vla_data:
+    dataset_py: behavior_skill_lerobot_datasets
+    # ★ easy mix 名是两级 -> data_root_dir 指 V1.0/easy; 入口脚本用 DATA_ROOT 覆盖。
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    use_local_videos: true
+    data_mix: gt_behavior_skill_easy
+    balance_dataset_weights: true      # size_proportional
+    balance_trajectory_weights: true
+    include_source_span_names: []
+    include_state: false               # 显式声明: 无状态(loader 默认也是 false)
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    action_norm_stats_path: examples/Behavior-Skill-GT/norm_stats_easy.json
+    per_device_batch_size: 4           # ★ 占位: Cosmos 骨干重(yelin debug bs4@8卡), 冒烟后定
+    video_backend: decord
+    num_workers: 16
+    prefetch_factor: 4
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  repeated_diffusion_steps: 8
+  # ★ 占位: 按 bs4×16卡=64 全局 -> 5 epoch = 7.0M×5/64 ≈ 547k。冒烟定 bs 后重算(见文件头)。
+  max_train_steps: 547000
+  num_warmup_steps: 5000
+  save_interval: 20000       # 547k/20k ≈ 27 个 ckpt(Cosmos ckpt 比 2B Qwen 大, 别设太密)
+  eval_interval: 200
+  learning_rate:
+    base: 2.5e-05
+    # ★ Cosmos 框架的骨干属性名是 `backbone`(不是 qwen_vl_interface), key 写错会回退 base LR
+    #   (trainer_tools 已改为大声警告)。
+    backbone: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
