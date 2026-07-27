@@ -14,6 +14,8 @@ Conventions:
 import argparse
 import json
 import os
+import shutil
+import socket
 import time
 from pathlib import Path
 from typing import Dict, Tuple
@@ -37,6 +39,19 @@ from starVLA.model.framework.base_framework import build_framework
 from starVLA.model.framework.share_tools import apply_config_compat
 from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
 from starVLA.training.trainer_utils.experiment_logger import ExperimentLogger
+from starVLA.training.trainer_utils.full_state_checkpoint import (
+    LOCAL_COMPLETE_MARKER,
+    METADATA_FILENAME,
+    FullStateMetadata,
+    atomic_write_json,
+    full_state_incomplete_dir,
+    full_state_root,
+    full_state_step_dir,
+    latest_full_state_dir,
+    prune_local_full_states,
+    restore_dataloader_position,
+    validate_resume_compatibility,
+)
 from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_param_lr_groups, setup_optimizer_and_scheduler, normalize_dotlist_args
 
 deepspeed_plugin = DeepSpeedPlugin()
@@ -260,6 +275,12 @@ class VLATrainer(TrainerUtils):
         self.accelerator = accelerator
 
         self.completed_steps = 0
+        self.consumed_batches = 0
+        self.vla_epoch_count = 0
+        self.batches_into_epoch = 0
+        self.full_state_resume_path = None
+        self.full_state_resume_metadata = None
+        self.resume_mode = None
         self.total_batch_size = self._calculate_total_batch_size()
         self.experiment_logger = ExperimentLogger(cfg=self.config, logger=logger)
         self.action_logging_spec = resolve_action_logging_spec(self.config)
@@ -276,7 +297,8 @@ class VLATrainer(TrainerUtils):
         self._save_initial_configs()
 
         self._init_checkpointing()
-        self._adjust_lr_scheduler_for_resume()
+        if self.resume_mode == "weights_only":
+            self._adjust_lr_scheduler_for_resume()
 
         freeze_modules = (
             self.config.trainer.freeze_modules
@@ -292,6 +314,11 @@ class VLATrainer(TrainerUtils):
             self.optimizer,
             self.vla_train_dataloader,
         )
+
+        self.full_batches_per_epoch = len(self.vla_train_dataloader)
+        if self.full_state_resume_path is not None:
+            self._restore_full_training_state()
+            self._restore_data_position()
 
         self.experiment_logger.init()
 
@@ -328,18 +355,53 @@ class VLATrainer(TrainerUtils):
         """Initialize checkpoint directory and handle checkpoint loading."""
         self.checkpoint_dir = os.path.join(self.config.output_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.full_state_dir = full_state_root(self.config.output_dir)
 
         pretrained_checkpoint = getattr(self.config.trainer, "pretrained_checkpoint", None)
         is_resume = getattr(self.config.trainer, "is_resume", False)
         self.resume_from_checkpoint = pretrained_checkpoint
 
         if is_resume:
+            if self._full_state_enabled():
+                require_merged = bool(getattr(self.config.trainer, "full_state_require_merged", True))
+                full_state_path, metadata = latest_full_state_dir(
+                    self.full_state_dir,
+                    require_merged=require_merged,
+                )
+                if full_state_path is not None:
+                    self.full_state_resume_path = str(full_state_path)
+                    self.full_state_resume_metadata = metadata
+                    self.completed_steps = metadata.completed_steps
+                    self.consumed_batches = metadata.consumed_batches
+                    self.vla_epoch_count = metadata.data_epoch
+                    self.batches_into_epoch = metadata.batches_into_epoch
+                    self.resume_mode = "full"
+                    logger.info(
+                        "Full-state resume selected: %s (step=%d, epoch=%d, batches_into_epoch=%d)",
+                        full_state_path,
+                        self.completed_steps,
+                        self.vla_epoch_count,
+                        self.batches_into_epoch,
+                    )
+                    return
+
+                if bool(getattr(self.config.trainer, "full_state_resume_strict", False)):
+                    marker_name = "_MERGED_COMPLETE" if require_merged else LOCAL_COMPLETE_MARKER
+                    raise RuntimeError(
+                        f"trainer.is_resume=true requires a complete full-state checkpoint under "
+                        f"{self.full_state_dir}, but none has marker {marker_name}. "
+                        "For two-node local storage, merge the per-node shards before launching."
+                    )
+
             resume_from_checkpoint, self.completed_steps = self._get_latest_checkpoint(self.checkpoint_dir)
             if resume_from_checkpoint:
                 self.resume_from_checkpoint = resume_from_checkpoint
                 self.model = self.load_pretrained_backbones(self.model, self.resume_from_checkpoint, reload_modules=None)
+                self.resume_mode = "weights_only"
                 logger.info(
-                    f"Resuming training from checkpoint: {self.resume_from_checkpoint}, steps: {self.completed_steps}"
+                    "⚠️ Weights-only resume from %s at step %d; optimizer/RNG/data cursor are not restored.",
+                    self.resume_from_checkpoint,
+                    self.completed_steps,
                 )
                 return
 
@@ -356,6 +418,57 @@ class VLATrainer(TrainerUtils):
             logger.info("No pretrained checkpoint provided. Starting training from scratch.")
             self.completed_steps = 0
 
+    def _full_state_enabled(self) -> bool:
+        return bool(getattr(self.config.trainer, "full_state_save", False))
+
+    def _local_world_size(self) -> int:
+        return int(os.environ.get("LOCAL_WORLD_SIZE", self.accelerator.num_processes))
+
+    def _build_full_state_metadata(self) -> FullStateMetadata:
+        return FullStateMetadata(
+            completed_steps=self.completed_steps,
+            consumed_batches=self.consumed_batches,
+            data_epoch=self.vla_epoch_count,
+            batches_into_epoch=self.batches_into_epoch,
+            world_size=self.accelerator.num_processes,
+            local_world_size=self._local_world_size(),
+            per_device_batch_size=int(self.config.datasets.vla_data.per_device_batch_size),
+            gradient_accumulation_steps=int(self.accelerator.gradient_accumulation_steps),
+            eval_interval=int(self.config.trainer.eval_interval),
+        )
+
+    def _restore_full_training_state(self):
+        """Restore DeepSpeed model/optimizer/scheduler plus Accelerate RNG state."""
+
+        if self.full_state_resume_metadata is None:
+            raise RuntimeError("Full-state resume metadata was not initialized.")
+        validate_resume_compatibility(
+            self.full_state_resume_metadata,
+            world_size=self.accelerator.num_processes,
+            local_world_size=self._local_world_size(),
+            per_device_batch_size=int(self.config.datasets.vla_data.per_device_batch_size),
+            gradient_accumulation_steps=int(self.accelerator.gradient_accumulation_steps),
+            eval_interval=int(self.config.trainer.eval_interval),
+        )
+        self.accelerator.load_state(self.full_state_resume_path)
+        self.accelerator.wait_for_everyone()
+        logger.info("✅ Restored complete training state from %s", self.full_state_resume_path)
+
+    def _restore_data_position(self):
+        if self.full_state_resume_metadata is None:
+            raise RuntimeError("Full-state resume metadata was not initialized.")
+        sample_offset = restore_dataloader_position(
+            self.vla_train_dataloader,
+            self.full_state_resume_metadata,
+            split_batches=bool(self.accelerator.dataloader_config.split_batches),
+        )
+        logger.info(
+            "✅ Restored data cursor: epoch=%d, per-rank batches=%d, global sample offset=%d",
+            self.vla_epoch_count,
+            self.batches_into_epoch,
+            sample_offset,
+        )
+
     def _adjust_lr_scheduler_for_resume(self):
         """Adjust LR scheduler state after resuming from non-zero steps."""
         if self.completed_steps > 0:
@@ -366,13 +479,8 @@ class VLATrainer(TrainerUtils):
                 f"LR scheduler adjusted to step {self.completed_steps}, current LR: {self.lr_scheduler.get_last_lr()}"
             )
 
-    def _load_checkpoint(self, checkpoint_path):
-        """Load checkpoint."""
-        self.accelerator.load_state(checkpoint_path)
-        self.accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
-
-    def _save_checkpoint(self):
-        """Save current training state."""
+    def _save_portable_checkpoint(self):
+        """Save the model-only checkpoint used by evaluation and warm starts."""
         if self.accelerator.is_main_process:
             save_format = getattr(self.config.trainer, "save_format", "pt")
             checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
@@ -400,6 +508,71 @@ class VLATrainer(TrainerUtils):
 
         self.accelerator.wait_for_everyone()
 
+    def _save_full_training_state(self):
+        """Atomically save node-local DeepSpeed/Accelerate state on every rank."""
+
+        metadata = self._build_full_state_metadata()
+        root = self.full_state_dir
+        incomplete_dir = full_state_incomplete_dir(root, self.completed_steps)
+        final_dir = full_state_step_dir(root, self.completed_steps)
+
+        if self.accelerator.is_local_main_process:
+            root.mkdir(parents=True, exist_ok=True)
+            if final_dir.exists():
+                raise FileExistsError(f"Refusing to overwrite completed full-state checkpoint: {final_dir}")
+            if incomplete_dir.exists():
+                shutil.rmtree(incomplete_dir)
+            incomplete_dir.mkdir(parents=True, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+
+        if str(self.accelerator.distributed_type).upper().endswith("DEEPSPEED"):
+            node_local_enabled = bool(
+                callable(getattr(self.model, "use_node_local_storage", None))
+                and self.model.use_node_local_storage()
+            )
+            if self.accelerator.num_processes > self._local_world_size() and not node_local_enabled:
+                raise RuntimeError(
+                    "Multi-node full-state save requires DeepSpeed "
+                    "checkpoint.use_node_local_storage=true."
+                )
+
+        self.accelerator.save_state(
+            str(incomplete_dir),
+            safe_serialization=False,
+            client_state=metadata.to_dict(),
+        )
+        self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_local_main_process:
+            atomic_write_json(incomplete_dir / METADATA_FILENAME, metadata.to_dict())
+            atomic_write_json(
+                incomplete_dir / LOCAL_COMPLETE_MARKER,
+                {
+                    "hostname": socket.gethostname(),
+                    "completed_steps": self.completed_steps,
+                    "world_size": metadata.world_size,
+                    "local_world_size": metadata.local_world_size,
+                },
+            )
+            os.replace(incomplete_dir, final_dir)
+            keep_last = int(getattr(self.config.trainer, "full_state_keep_last", 2))
+            removed = prune_local_full_states(root, keep_last=keep_last)
+            if removed:
+                logger.info("Pruned old local full-state checkpoints: %s", [str(path) for path in removed])
+        self.accelerator.wait_for_everyone()
+        logger.info(
+            "✅ Node-local full training state saved at %s; merge both nodes before resume.",
+            final_dir,
+        )
+
+    def _save_checkpoint(self, *, save_portable: bool, save_full_state: bool):
+        """Save either or both checkpoint representations at this step."""
+
+        if save_portable:
+            self._save_portable_checkpoint()
+        if save_full_state:
+            self._save_full_training_state()
+
     def _log_metrics(self, metrics):
         """Record training metrics."""
         if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
@@ -407,7 +580,10 @@ class VLATrainer(TrainerUtils):
             for i, group in enumerate(self.optimizer.param_groups):
                 group_name = group.get("name", str(i))
                 metrics[f"learning_rate/{group_name}"] = last_lrs[i] if i < len(last_lrs) else last_lrs[-1]
-            metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
+            metrics["epoch"] = round(
+                self.vla_epoch_count + self.batches_into_epoch / self.full_batches_per_epoch,
+                2,
+            )
             self.experiment_logger.log_metrics(metrics, step=self.completed_steps)
             logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
 
@@ -477,13 +653,14 @@ class VLATrainer(TrainerUtils):
         try:
             batch_vla = next(self.vla_iter)
         except StopIteration:
-            if not hasattr(self, "vla_epoch_count"):
-                self.vla_epoch_count = 0
             self.vla_iter, self.vla_epoch_count = TrainerUtils._reset_dataloader(
                 self.vla_train_dataloader, self.vla_epoch_count
             )
+            self.batches_into_epoch = 0
             batch_vla = next(self.vla_iter)
 
+        self.consumed_batches += 1
+        self.batches_into_epoch += 1
         return batch_vla
 
     def train(self):
@@ -534,8 +711,27 @@ class VLATrainer(TrainerUtils):
             step_metrics["timing/model"] = t_end_model - t_start_model
             self._log_metrics(step_metrics)
 
-            if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
-                self._save_checkpoint()
+            save_portable = (
+                self.completed_steps > 0
+                and self.completed_steps % self.config.trainer.save_interval == 0
+            )
+            full_state_interval = int(
+                getattr(
+                    self.config.trainer,
+                    "full_state_save_interval",
+                    self.config.trainer.save_interval,
+                )
+            )
+            save_full_state = (
+                self._full_state_enabled()
+                and self.completed_steps > 0
+                and self.completed_steps % full_state_interval == 0
+            )
+            if save_portable or save_full_state:
+                self._save_checkpoint(
+                    save_portable=save_portable,
+                    save_full_state=save_full_state,
+                )
 
             if self.completed_steps >= self.config.trainer.max_train_steps:
                 break

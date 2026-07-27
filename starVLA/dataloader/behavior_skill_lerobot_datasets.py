@@ -1,21 +1,23 @@
 import copy
-import json
 import inspect
+import json
 import logging
+import multiprocessing as mp
 from pathlib import Path
 
-from omegaconf import OmegaConf
 import torch
+from omegaconf import OmegaConf
 from torch.utils.data import Sampler
 
 from starVLA.dataloader.gr00t_lerobot.behavior1k_utils import B1K_ACTION23_SLICES
 from starVLA.dataloader.gr00t_lerobot.behavior_skill_dataset import BehaviorSkillSingleDataset
-from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotMixtureDataset
+from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotMixtureDataset, safe_hash
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 from starVLA.dataloader.gr00t_lerobot.registry import (
     DATASET_NAMED_MIXTURES,
     ROBOT_TYPE_CONFIG_MAP,
 )
+from starVLA.dataloader.worker_resume_state import deterministic_sample_rng
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +53,29 @@ def _patch_behavior_skill_action_mask(stats_payload: dict) -> dict:
 class BehaviorSkillMixtureDataset(LeRobotMixtureDataset):
     """Behavior-only wrapper that propagates epoch updates to child datasets."""
 
+    def __init__(self, *args, **kwargs):
+        # Persistent DataLoader workers have private Python objects, but this
+        # scalar remains shared with the trainer process across epoch updates.
+        self._shared_epoch = mp.RawValue("q", 0)
+        super().__init__(*args, **kwargs)
+
     def set_epoch(self, epoch: int):
+        epoch = int(epoch)
+        self._shared_epoch.value = epoch
         super().set_epoch(epoch)
         for dataset in getattr(self, "datasets", []):
             if callable(getattr(dataset, "set_epoch", None)):
                 dataset.set_epoch(epoch)
+
+    def __getitem__(self, index: int) -> dict:
+        # Accelerate checkpoints the trainer RNG but not persistent worker RNG
+        # streams. Seeding each sample makes a mid-epoch restart reproduce the
+        # same mixture choice, retry path, and image augmentation parameters.
+        epoch = int(self._shared_epoch.value)
+        self.epoch = epoch
+        sample_seed = safe_hash(("behavior-skill-sample", epoch, int(index), int(self.seed)))
+        with deterministic_sample_rng(sample_seed):
+            return super().__getitem__(index)
 
     def save_dataset_statistics(self, save_path: Path | str, format: str = "json") -> None:
         super().save_dataset_statistics(save_path, format=format)
@@ -79,6 +99,8 @@ class BehaviorSkillEpochSampler(Sampler[int]):
     def __init__(self, dataset: BehaviorSkillMixtureDataset):
         self.dataset = dataset
         self.epoch = 0
+        self._resume_sample_offset = 0
+        self._resume_epoch = None
         self.dataset.set_epoch(0)
 
     def __iter__(self):
@@ -87,14 +109,32 @@ class BehaviorSkillEpochSampler(Sampler[int]):
         generator = torch.Generator()
         generator.manual_seed(int(self.epoch))
         indices = torch.randperm(len(self.dataset), generator=generator).tolist()
-        return iter(indices)
+        return iter(indices[self._resume_sample_offset :])
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        return max(0, len(self.dataset) - self._resume_sample_offset)
 
     def set_epoch(self, epoch: int):
+        epoch = int(epoch)
+        preserve_resume_offset = self._resume_epoch == epoch
         self.epoch = epoch
+        if preserve_resume_offset:
+            self.dataset.set_epoch(epoch)
+            return
+        self._resume_sample_offset = 0
+        self._resume_epoch = None
         self.dataset.set_epoch(epoch)
+
+    def set_resume_sample_offset(self, sample_offset: int):
+        """Start the next iterator at a deterministic point within this epoch."""
+
+        sample_offset = int(sample_offset)
+        if sample_offset < 0 or sample_offset > len(self.dataset):
+            raise ValueError(
+                f"resume sample offset {sample_offset} is outside [0, {len(self.dataset)}]"
+            )
+        self._resume_sample_offset = sample_offset
+        self._resume_epoch = self.epoch
 
 
 def make_behavior_skill_dataset(

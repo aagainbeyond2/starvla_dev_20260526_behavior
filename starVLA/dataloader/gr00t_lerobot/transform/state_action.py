@@ -417,7 +417,7 @@ class StateActionTransform(InvertibleModalityTransform):
             ), f"{getattr(modality_metadata, modality)[state_key].shape=}"
             self.normalization_statistics[key] = getattr(dataset_statistics, modality)[
                 state_key
-            ].model_dump()
+            ].model_dump(exclude_none=True)
 
         # Initialize the rotation transformers
         for key in self.target_rotations:

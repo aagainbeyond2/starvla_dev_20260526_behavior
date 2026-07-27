@@ -183,6 +183,8 @@ data_processed
 llavavla/conf/qwenvla_lmdb_3Lpretrain.yaml
 extracted_frames
 starVLA/config/deepseeds/*
+!starVLA/config/deepseeds/ds_config_node_local_checkpoint.yaml
+!starVLA/config/deepseeds/deepspeed_zero2_node_local_checkpoint.yaml
 **/bar
 llavavla/model/openvla_temp
 real_deployment/upload/push_model_to_hf.py
