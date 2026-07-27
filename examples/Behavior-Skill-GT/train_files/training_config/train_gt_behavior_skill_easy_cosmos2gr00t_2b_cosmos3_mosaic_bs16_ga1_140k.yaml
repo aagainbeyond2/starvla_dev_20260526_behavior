@@ -1,0 +1,116 @@
+run_id: gt_behavior_skill_easy_cosmos2gr00t_2b_cosmos3_mosaic_bs16_ga1_140k
+run_root_dir: ./results/Checkpoints
+logging_backend: tensorboard
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_BehaviorSkill
+is_debug: false
+version_id: "0.21"
+
+# Cosmos-Predict2-2B + GR00T, aligned with PI Easy's physical and effective
+# batch: per-device 16 x 16 GPUs x GAS 1 = global batch 256.
+framework:
+  name: CosmoPredict2GR00T
+
+  world_model:
+    base_wm: ./playground/Pretrained_models/nvidia/Cosmos-Predict2-2B-Video2World
+    extract_layers: [-1]
+    # Cosmos2-only Cosmos3-style mosaic: head 224x224 on top, then
+    # left/right wrist 112x112 side-by-side below. Final HxW = 336x224.
+    view_fusion: cosmos3_mosaic
+    obs_resolution: [336, 224]
+
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/nvidia/Cosmos-Predict2-2B-Video2World
+    vl_hidden_dim: 2048
+
+  action_model:
+    action_model_type: DiT-B
+    action_dim: 23
+    state_dim: 0
+    action_horizon: 30
+    action_hidden_dim: 1024
+    hidden_size: 1024
+    add_pos_embed: true
+    max_seq_len: 1024
+    repeated_diffusion_steps: 8
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 4
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:
+      cross_attention_dim: 2048
+      action_dit_hidden_dim: 1024
+      dropout: 0.0
+      final_dropout: false
+      interleave_self_attention: true
+      norm_type: ada_norm
+      num_layers: 16
+      output_dim: 1024
+      positional_embeddings: null
+      attention_head_dim: 64
+
+datasets:
+  vla_data:
+    dataset_py: behavior_skill_lerobot_datasets
+    data_root_dir: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/Behavior_Skill_V1.0/easy
+    source_video_root: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/datasets_training/training_data/behavior-1k_demo/videos
+    use_local_videos: true
+    data_mix: gt_behavior_skill_easy
+    balance_dataset_weights: true
+    balance_trajectory_weights: true
+    include_source_span_names: []
+    include_state: false
+    action_mode: b1k_delta
+    action_mode_apply_keys:
+      - action.torso
+      - action.left_arm
+      - action.right_arm
+    action_norm_stats_path: examples/Behavior-Skill-GT/norm_stats_easy.json
+    per_device_batch_size: 16
+    video_backend: decord
+    video_use_frame_indices: true
+    video_backend_kwargs:
+      num_threads: 2
+    num_workers: 16
+    prefetch_factor: 4
+    image_augmentation:
+      enabled: true
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+      random_grayscale_p: 0.05
+
+trainer:
+  repeated_diffusion_steps: 8
+  # 140k x global batch 256 covers about 5.1 natural data passes, matching PI Easy.
+  max_train_steps: 140000
+  num_warmup_steps: 5000
+  save_interval: 5000
+  eval_interval: 200
+
+  full_state_save: true
+  full_state_save_interval: 5000
+  full_state_keep_last: 2
+  full_state_require_merged: true
+  full_state_resume_strict: true
+
+  learning_rate:
+    base: 2.5e-05
+    backbone: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08

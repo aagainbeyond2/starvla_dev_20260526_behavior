@@ -108,10 +108,23 @@ class _CosmoPredict2_Interface(nn.Module):
         #     single DiT pass, then concatenate the per-view features along the TOKEN
         #     axis -> features [B, num_views * N, D]. Token count (and VRAM) scale with
         #     the number of views, since each view is encoded at full obs_resolution.
+        #   - "cosmos3_mosaic": Cosmos3-style fixed three-view canvas. The head view is
+        #     224x224 on top; left/right wrist views are 112x112 side-by-side below.
+        #     The resulting single frame is 336x224 (H x W) -> features [B, N, D].
         self._view_fusion = str(wm_cfg.get("view_fusion", "tile")).lower()
-        if self._view_fusion not in ("tile", "batch"):
+        if self._view_fusion not in ("tile", "batch", "cosmos3_mosaic"):
             raise ValueError(
-                f"world_model.view_fusion must be 'tile' or 'batch', got '{self._view_fusion}'."
+                "world_model.view_fusion must be 'tile', 'batch', or "
+                f"'cosmos3_mosaic', got '{self._view_fusion}'."
+            )
+        if self._view_fusion == "cosmos3_mosaic" and (
+            self._obs_height,
+            self._obs_width,
+        ) != (336, 224):
+            raise ValueError(
+                "world_model.view_fusion='cosmos3_mosaic' requires "
+                "world_model.obs_resolution: [336, 224] (H x W), got "
+                f"[{self._obs_height}, {self._obs_width}]."
             )
 
         # Freeze VAE and text encoder by default
@@ -200,6 +213,32 @@ class _CosmoPredict2_Interface(nn.Module):
             tile = self._letterbox(view, target_h, tile_w)
             canvas.paste(tile, (x_offset, 0))
             x_offset += tile_w
+        return canvas
+
+    @classmethod
+    def _compose_cosmos3_mosaic(cls, views: Sequence[Image.Image]) -> Image.Image:
+        """Build the fixed Cosmos3-style Behavior-Skill three-view observation.
+
+        Input order is the dataset/model contract:
+          0. head camera       -> 224x224, top
+          1. left wrist       -> 112x112, bottom-left
+          2. right wrist      -> 112x112, bottom-right
+
+        Each view is resized with aspect-ratio-preserving letterbox padding. The
+        returned RGB canvas is exactly 224 pixels wide by 336 pixels high.
+        """
+        views = list(views)
+        if len(views) != 3:
+            raise ValueError(
+                "view_fusion='cosmos3_mosaic' requires exactly 3 views in "
+                "[head, left_wrist, right_wrist] order, "
+                f"but received {len(views)}."
+            )
+
+        canvas = Image.new("RGB", (224, 336), (0, 0, 0))
+        canvas.paste(cls._letterbox(views[0], 224, 224), (0, 0))
+        canvas.paste(cls._letterbox(views[1], 112, 112), (0, 224))
+        canvas.paste(cls._letterbox(views[2], 112, 112), (112, 224))
         return canvas
 
     def _register_hooks(self):
@@ -291,7 +330,7 @@ class _CosmoPredict2_Interface(nn.Module):
     def _encode_images(self, images, num_frames=None):
         """Encode observation images through the VAE to get latent tokens.
 
-        Two multi-view fusion strategies are supported (world_model.view_fusion):
+        Three multi-view fusion strategies are supported (world_model.view_fusion):
 
         - "tile" (default): the per-sample camera views are tiled side-by-side into
           ONE composed frame (see _compose_views_single_frame) with aspect-preserving
@@ -304,6 +343,10 @@ class _CosmoPredict2_Interface(nn.Module):
           sample-major ([s0v0, s0v1, ..., s1v0, ...]) so the per-view features can be
           regrouped and concatenated along the token axis later. Effective batch ==
           B * num_views.
+
+        - "cosmos3_mosaic": exactly three views in [head, left_wrist, right_wrist]
+          order are composed into one 336x224 frame: a 224x224 head view above two
+          112x112 wrist views. Effective batch == B, num_views == 1.
 
         Args:
             images: List (batch) of per-sample views. Each element is a list of
@@ -343,15 +386,18 @@ class _CosmoPredict2_Interface(nn.Module):
                     batch_videos.append(video_tensor.squeeze(0))  # [C, 1, H, W]
             num_views = num_views or 1
         else:
-            # Compose each sample's views into a single letterboxed frame, then
-            # preprocess (normalize to [-1, 1]); the composed frame is already at the
-            # target resolution so preprocess_video does not resize/stretch it.
+            # Compose each sample's views into a single frame, then preprocess
+            # (normalize to [-1, 1]). The composed frame is already at the target
+            # resolution so preprocess_video does not resize/stretch it.
             num_views = 1
             for sample_imgs in images:
                 if not isinstance(sample_imgs, (list, tuple)):
                     sample_imgs = [sample_imgs]
 
-                composed = self._compose_views_single_frame(sample_imgs, height, width)
+                if self._view_fusion == "cosmos3_mosaic":
+                    composed = self._compose_cosmos3_mosaic(sample_imgs)
+                else:
+                    composed = self._compose_views_single_frame(sample_imgs, height, width)
                 video_tensor = self.video_processor.preprocess_video([composed], height=height, width=width)
                 video_tensor = video_tensor.to(device=device, dtype=dtype)  # [1, C, 1, H, W]
                 batch_videos.append(video_tensor.squeeze(0))  # [C, 1, H, W]
