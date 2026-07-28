@@ -40,14 +40,18 @@ from starVLA.model.framework.share_tools import apply_config_compat
 from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
 from starVLA.training.trainer_utils.experiment_logger import ExperimentLogger
 from starVLA.training.trainer_utils.full_state_checkpoint import (
+    FULL_STATE_STORAGE_SHARED,
     LOCAL_COMPLETE_MARKER,
+    MERGED_COMPLETE_MARKER,
     METADATA_FILENAME,
     FullStateMetadata,
     atomic_write_json,
+    full_state_completion_markers,
     full_state_incomplete_dir,
     full_state_root,
     full_state_step_dir,
     latest_full_state_dir,
+    normalize_full_state_storage,
     prune_local_full_states,
     restore_dataloader_position,
     validate_resume_compatibility,
@@ -386,7 +390,7 @@ class VLATrainer(TrainerUtils):
                     return
 
                 if bool(getattr(self.config.trainer, "full_state_resume_strict", False)):
-                    marker_name = "_MERGED_COMPLETE" if require_merged else LOCAL_COMPLETE_MARKER
+                    marker_name = MERGED_COMPLETE_MARKER if require_merged else LOCAL_COMPLETE_MARKER
                     raise RuntimeError(
                         f"trainer.is_resume=true requires a complete full-state checkpoint under "
                         f"{self.full_state_dir}, but none has marker {marker_name}. "
@@ -420,6 +424,11 @@ class VLATrainer(TrainerUtils):
 
     def _full_state_enabled(self) -> bool:
         return bool(getattr(self.config.trainer, "full_state_save", False))
+
+    def _full_state_storage(self) -> str:
+        return normalize_full_state_storage(
+            getattr(self.config.trainer, "full_state_storage", "node_local")
+        )
 
     def _local_world_size(self) -> int:
         return int(os.environ.get("LOCAL_WORLD_SIZE", self.accelerator.num_processes))
@@ -509,14 +518,41 @@ class VLATrainer(TrainerUtils):
         self.accelerator.wait_for_everyone()
 
     def _save_full_training_state(self):
-        """Atomically save node-local DeepSpeed/Accelerate state on every rank."""
+        """Atomically save DeepSpeed/Accelerate state on node-local or shared storage."""
 
         metadata = self._build_full_state_metadata()
         root = self.full_state_dir
         incomplete_dir = full_state_incomplete_dir(root, self.completed_steps)
         final_dir = full_state_step_dir(root, self.completed_steps)
+        storage = self._full_state_storage()
+        shared_storage = storage == FULL_STATE_STORAGE_SHARED
+        publisher = (
+            self.accelerator.is_main_process
+            if shared_storage
+            else self.accelerator.is_local_main_process
+        )
 
-        if self.accelerator.is_local_main_process:
+        if str(self.accelerator.distributed_type).upper().endswith("DEEPSPEED"):
+            node_local_enabled = bool(
+                callable(getattr(self.model, "use_node_local_storage", None))
+                and self.model.use_node_local_storage()
+            )
+            if shared_storage and node_local_enabled:
+                raise RuntimeError(
+                    "Shared full-state save requires DeepSpeed "
+                    "checkpoint.use_node_local_storage=false."
+                )
+            if (
+                not shared_storage
+                and self.accelerator.num_processes > self._local_world_size()
+                and not node_local_enabled
+            ):
+                raise RuntimeError(
+                    "Multi-node node-local full-state save requires DeepSpeed "
+                    "checkpoint.use_node_local_storage=true."
+                )
+
+        if publisher:
             root.mkdir(parents=True, exist_ok=True)
             if final_dir.exists():
                 raise FileExistsError(f"Refusing to overwrite completed full-state checkpoint: {final_dir}")
@@ -525,17 +561,6 @@ class VLATrainer(TrainerUtils):
             incomplete_dir.mkdir(parents=True, exist_ok=True)
         self.accelerator.wait_for_everyone()
 
-        if str(self.accelerator.distributed_type).upper().endswith("DEEPSPEED"):
-            node_local_enabled = bool(
-                callable(getattr(self.model, "use_node_local_storage", None))
-                and self.model.use_node_local_storage()
-            )
-            if self.accelerator.num_processes > self._local_world_size() and not node_local_enabled:
-                raise RuntimeError(
-                    "Multi-node full-state save requires DeepSpeed "
-                    "checkpoint.use_node_local_storage=true."
-                )
-
         self.accelerator.save_state(
             str(incomplete_dir),
             safe_serialization=False,
@@ -543,27 +568,30 @@ class VLATrainer(TrainerUtils):
         )
         self.accelerator.wait_for_everyone()
 
-        if self.accelerator.is_local_main_process:
+        if publisher:
             atomic_write_json(incomplete_dir / METADATA_FILENAME, metadata.to_dict())
-            atomic_write_json(
-                incomplete_dir / LOCAL_COMPLETE_MARKER,
-                {
-                    "hostname": socket.gethostname(),
-                    "completed_steps": self.completed_steps,
-                    "world_size": metadata.world_size,
-                    "local_world_size": metadata.local_world_size,
-                },
-            )
+            marker_payload = {
+                "hostname": socket.gethostname(),
+                "completed_steps": self.completed_steps,
+                "world_size": metadata.world_size,
+                "local_world_size": metadata.local_world_size,
+                "storage": storage,
+            }
+            for marker in full_state_completion_markers(storage):
+                atomic_write_json(incomplete_dir / marker, marker_payload)
             os.replace(incomplete_dir, final_dir)
             keep_last = int(getattr(self.config.trainer, "full_state_keep_last", 2))
             removed = prune_local_full_states(root, keep_last=keep_last)
             if removed:
-                logger.info("Pruned old local full-state checkpoints: %s", [str(path) for path in removed])
+                logger.info("Pruned old full-state checkpoints: %s", [str(path) for path in removed])
         self.accelerator.wait_for_everyone()
-        logger.info(
-            "✅ Node-local full training state saved at %s; merge both nodes before resume.",
-            final_dir,
-        )
+        if shared_storage:
+            logger.info("✅ Shared full training state saved at %s.", final_dir)
+        else:
+            logger.info(
+                "✅ Node-local full training state saved at %s; merge all nodes before resume.",
+                final_dir,
+            )
 
     def _save_checkpoint(self, *, save_portable: bool, save_full_state: bool):
         """Save either or both checkpoint representations at this step."""

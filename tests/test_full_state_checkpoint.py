@@ -4,11 +4,15 @@ import unittest
 from pathlib import Path
 
 from starVLA.training.trainer_utils.full_state_checkpoint import (
+    FULL_STATE_STORAGE_NODE_LOCAL,
+    FULL_STATE_STORAGE_SHARED,
     LOCAL_COMPLETE_MARKER,
     MERGED_COMPLETE_MARKER,
     METADATA_FILENAME,
     FullStateMetadata,
+    full_state_completion_markers,
     latest_full_state_dir,
+    normalize_full_state_storage,
     prune_local_full_states,
     restore_dataloader_position,
     validate_resume_compatibility,
@@ -57,6 +61,20 @@ class Wrapper:
 
 
 class FullStateCheckpointTests(unittest.TestCase):
+    def test_full_state_storage_modes(self):
+        self.assertEqual(normalize_full_state_storage(None), FULL_STATE_STORAGE_NODE_LOCAL)
+        self.assertEqual(normalize_full_state_storage(" Shared "), FULL_STATE_STORAGE_SHARED)
+        self.assertEqual(
+            full_state_completion_markers(FULL_STATE_STORAGE_NODE_LOCAL),
+            (LOCAL_COMPLETE_MARKER,),
+        )
+        self.assertEqual(
+            full_state_completion_markers(FULL_STATE_STORAGE_SHARED),
+            (LOCAL_COMPLETE_MARKER, MERGED_COMPLETE_MARKER),
+        )
+        with self.assertRaisesRegex(ValueError, "full_state_storage"):
+            normalize_full_state_storage("object_store")
+
     def test_latest_requires_merged_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

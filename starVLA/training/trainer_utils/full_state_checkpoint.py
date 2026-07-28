@@ -1,10 +1,11 @@
-"""Helpers for exact, node-local training-state checkpoints.
+"""Helpers for exact training-state checkpoints.
 
 The H100 training nodes use independent local filesystems. During a
 DeepSpeed ZeRO-2 save, every rank writes a different optimizer shard, so a
 checkpoint is only loadable after the per-node directories have been merged.
-This module keeps checkpoint discovery, metadata, sampler positioning, and
-local retention independent from the trainer implementation.
+The A800 training nodes instead share one filesystem and publish a complete
+checkpoint directly. This module keeps checkpoint discovery, metadata,
+sampler positioning, and retention independent from the trainer implementation.
 """
 
 from __future__ import annotations
@@ -22,8 +23,32 @@ FULL_STATE_DIRNAME = "full_state_checkpoints"
 LOCAL_COMPLETE_MARKER = "_LOCAL_COMPLETE"
 MERGED_COMPLETE_MARKER = "_MERGED_COMPLETE"
 METADATA_FILENAME = "trainer_state.json"
+FULL_STATE_STORAGE_NODE_LOCAL = "node_local"
+FULL_STATE_STORAGE_SHARED = "shared"
 
 _STEP_DIR_RE = re.compile(r"^steps_(\d+)$")
+
+
+def normalize_full_state_storage(value: Any) -> str:
+    """Validate and normalize the full-state storage topology."""
+
+    storage = str(value or FULL_STATE_STORAGE_NODE_LOCAL).strip().lower()
+    supported = {FULL_STATE_STORAGE_NODE_LOCAL, FULL_STATE_STORAGE_SHARED}
+    if storage not in supported:
+        raise ValueError(
+            f"Unsupported trainer.full_state_storage={value!r}; "
+            f"expected one of {sorted(supported)}."
+        )
+    return storage
+
+
+def full_state_completion_markers(storage: Any) -> tuple[str, ...]:
+    """Return markers that make a published checkpoint resumable."""
+
+    storage = normalize_full_state_storage(storage)
+    if storage == FULL_STATE_STORAGE_SHARED:
+        return LOCAL_COMPLETE_MARKER, MERGED_COMPLETE_MARKER
+    return (LOCAL_COMPLETE_MARKER,)
 
 
 @dataclass(frozen=True)
