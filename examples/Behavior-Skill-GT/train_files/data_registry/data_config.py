@@ -179,6 +179,11 @@ DATASET_NAMED_MIXTURES = {
     "gt_behavior_skill_smoke": [
         ("close_door/close_the_fridge_door", 1.0, "R1ProSkill"),
     ],
+    # Behavior-1K 2025 challenge Easy4 原始四任务 / 800 episodes。
+    # 配置中的 data_root_dir 指 datasets_training/training_data 父目录。
+    "gt_behavior_easy4": [
+        ("behavior-1k-easy4", 1.0, "R1ProSkill"),
+    ],
     # 全量 easy：34 个 skill_subtask
     "gt_behavior_skill_easy": [
         ("close_door/close_the_fridge_door", 1.0, "R1ProSkill"),

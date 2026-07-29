@@ -79,7 +79,4 @@ DATASET_NAMED_MIXTURES = {
     "BEHAVIOR_challenge": [
         ("BEHAVIOR_challenge", 1.0, "R1Pro"),
     ],
-    "behavior_easy4": [
-        ("behavior-1k-easy4", 1.0, "R1Pro"),
-    ],
 }
