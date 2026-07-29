@@ -17,6 +17,7 @@ import os
 import shutil
 import socket
 import time
+import warnings
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -44,6 +45,7 @@ from starVLA.training.trainer_utils.full_state_checkpoint import (
     LOCAL_COMPLETE_MARKER,
     MERGED_COMPLETE_MARKER,
     METADATA_FILENAME,
+    SCHEDULER_STATE_FILENAME,
     FullStateMetadata,
     atomic_write_json,
     full_state_completion_markers,
@@ -447,7 +449,7 @@ class VLATrainer(TrainerUtils):
         )
 
     def _restore_full_training_state(self):
-        """Restore DeepSpeed model/optimizer/scheduler plus Accelerate RNG state."""
+        """Restore DeepSpeed model/optimizer, LR scheduler, and Accelerate RNG state."""
 
         if self.full_state_resume_metadata is None:
             raise RuntimeError("Full-state resume metadata was not initialized.")
@@ -460,6 +462,28 @@ class VLATrainer(TrainerUtils):
             eval_interval=int(self.config.trainer.eval_interval),
         )
         self.accelerator.load_state(self.full_state_resume_path)
+        scheduler_path = Path(self.full_state_resume_path) / SCHEDULER_STATE_FILENAME
+        if scheduler_path.is_file():
+            scheduler_state = torch.load(scheduler_path, map_location="cpu")
+            self.lr_scheduler.load_state_dict(scheduler_state)
+            self._sync_optimizer_lrs_from_scheduler()
+            logger.info(
+                "✅ Restored LR scheduler state from %s at step %d; current LR: %s",
+                scheduler_path,
+                self.completed_steps,
+                self.lr_scheduler.get_last_lr(),
+            )
+        else:
+            # Older full-state checkpoints still contain the exact optimizer
+            # state and completed step. Reconstruct the closed-form schedule
+            # at that step instead of replaying every prior scheduler step.
+            self._adjust_lr_scheduler_for_resume()
+            logger.warning(
+                "Legacy full-state checkpoint has no %s; reconstructed LR "
+                "scheduler at completed step %d.",
+                SCHEDULER_STATE_FILENAME,
+                self.completed_steps,
+            )
         self.accelerator.wait_for_everyone()
         logger.info("✅ Restored complete training state from %s", self.full_state_resume_path)
 
@@ -482,11 +506,33 @@ class VLATrainer(TrainerUtils):
         """Adjust LR scheduler state after resuming from non-zero steps."""
         if self.completed_steps > 0:
             logger.info(f"Adjusting LR scheduler for resume from step {self.completed_steps}")
-            for _ in range(self.completed_steps):
-                self.lr_scheduler.step()
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*scheduler\.step\(\).*optimizer\.step\(\).*",
+                )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*epoch parameter in `scheduler\.step\(\)`.*",
+                )
+                self.lr_scheduler.step(self.completed_steps)
+            self._sync_optimizer_lrs_from_scheduler()
             logger.info(
                 f"LR scheduler adjusted to step {self.completed_steps}, current LR: {self.lr_scheduler.get_last_lr()}"
             )
+
+    def _sync_optimizer_lrs_from_scheduler(self):
+        """Keep the prepared optimizer and scheduler-owned optimizer at the same LR."""
+
+        last_lrs = self.lr_scheduler.get_last_lr()
+        optimizers = [self.lr_scheduler.optimizer, self.optimizer]
+        seen = set()
+        for optimizer in optimizers:
+            if id(optimizer) in seen:
+                continue
+            seen.add(id(optimizer))
+            for group, lr in zip(optimizer.param_groups, last_lrs):
+                group["lr"] = lr
 
     def _save_portable_checkpoint(self):
         """Save the model-only checkpoint used by evaluation and warm starts."""
@@ -569,6 +615,10 @@ class VLATrainer(TrainerUtils):
         self.accelerator.wait_for_everyone()
 
         if publisher:
+            torch.save(
+                self.lr_scheduler.state_dict(),
+                incomplete_dir / SCHEDULER_STATE_FILENAME,
+            )
             atomic_write_json(incomplete_dir / METADATA_FILENAME, metadata.to_dict())
             marker_payload = {
                 "hostname": socket.gethostname(),
