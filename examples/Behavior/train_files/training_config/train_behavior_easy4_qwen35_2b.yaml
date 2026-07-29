@@ -46,7 +46,7 @@ datasets:
 
 trainer:
   repeated_diffusion_steps: 8
-  max_train_steps: 30938  # 2 epochs: ceil(2 * 3,960,004 frames / global_batch 256)
+  max_train_steps: 78000  # rounded 5-epoch budget (exact ceil is 77,344 steps)
   num_warmup_steps: 5000
   save_interval: 5000
   eval_interval: 100

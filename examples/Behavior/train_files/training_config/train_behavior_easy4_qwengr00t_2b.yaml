@@ -8,7 +8,7 @@ is_debug: false
 version_id: "0.21"
 
 # Fair comparison with the Easy4 QwenPI_v3 run:
-# same Qwen3.5-2B backbone, data, action horizon, optimizer, and two epochs;
+# same Qwen3.5-2B backbone, data, action horizon, optimizer, and five epochs;
 # only the action framework changes to QwenGR00T.
 framework:
   name: QwenGR00T
@@ -49,7 +49,7 @@ datasets:
 
 trainer:
   repeated_diffusion_steps: 8
-  max_train_steps: 30938
+  max_train_steps: 78000  # rounded 5-epoch budget (exact ceil is 77,344 steps)
   num_warmup_steps: 5000
   save_interval: 5000
   eval_interval: 100
