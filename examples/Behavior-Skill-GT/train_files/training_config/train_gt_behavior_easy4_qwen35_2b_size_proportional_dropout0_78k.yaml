@@ -68,12 +68,12 @@ trainer:
   num_warmup_steps: 5000
   save_interval: 5000
   eval_interval: 200
-  # 两台 H100 各自保存完整 ZeRO/RNG/data-cursor/scheduler 状态；
-  # 续训前先用 prepare_2node_full_state_resume.py 合并两边 shard。
+  # 两台 A800 共享 /ms-aigc，由 global main process 原子发布完整
+  # ZeRO/RNG/data-cursor/scheduler 状态，避免两个 local-main 争用同一路径。
   full_state_save: true
   full_state_save_interval: 5000
   full_state_keep_last: 2
-  full_state_storage: node_local
+  full_state_storage: shared
   full_state_require_merged: true
   full_state_resume_strict: true
   learning_rate:

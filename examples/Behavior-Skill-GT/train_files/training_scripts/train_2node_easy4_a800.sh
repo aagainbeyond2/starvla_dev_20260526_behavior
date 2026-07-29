@@ -107,7 +107,7 @@ echo "[easy4-a800] data=$DATA_ROOT stats=$NORM_STATS_REAL run_id=$RUN_ID log=$LO
 echo "[easy4-a800] master=$MASTER_ADDR:$MASTER_PORT net=$NCCL_SOCKET_IFNAME ib=$NCCL_IB_HCA"
 
 accelerate launch \
-  --config_file starVLA/config/deepseeds/deepspeed_zero2_node_local_checkpoint.yaml \
+  --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
   --num_machines 2 \
   --num_processes 16 \
   --machine_rank "$NODE_RANK" \
