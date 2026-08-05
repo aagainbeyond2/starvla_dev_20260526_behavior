@@ -1,4 +1,4 @@
-run_id: gt_behavior_radio_trash_long_plus_easy_skills_qwen35_pi140k_44k
+run_id: gt_behavior_radio_trash_long_plus_easy_skills_qwen35_gr00t140k_44k
 run_root_dir: ./results/Checkpoints
 logging_backend: tensorboard
 seed: 42
@@ -7,27 +7,29 @@ wandb_project: starVLA_BehaviorSkill
 is_debug: false
 version_id: "0.21"
 
-# Fine-tune PI Easy 140K on two Easy4 long tasks and their five supporting Easy skills.
+# Fine-tune GR00T Easy 140K on two Easy4 long tasks and their five supporting Easy skills.
 framework:
-  name: QwenPI_v3
+  name: QwenGR00T
   qwenvl:
     base_vlm: ./playground/Pretrained_models/Qwen3.5-2B
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
 
   action_model:
+    action_model_type: DiT-B
     action_dim: 23
     state_dim: 44
     action_horizon: 30
     repeated_diffusion_steps: 8
     diffusion_model_cfg:
-      action_dit_hidden_dim: 1024
+      cross_attention_dim: 2048
       dropout: 0.0
       final_dropout: false
       interleave_self_attention: true
       norm_type: ada_norm
+      num_layers: 16
+      output_dim: 1024
       positional_embeddings: null
-      attention_head_dim: 64
 
 datasets:
   vla_data:
@@ -62,7 +64,7 @@ datasets:
 
 trainer:
   repeated_diffusion_steps: 8
-  pretrained_checkpoint: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/Final_Checkpoints/Easy/PI/gt_behavior_skill_easy_qwen35_2b_size_proportional_dropout0_140k_fastio/checkpoints/steps_140000_pytorch_model.pt
+  pretrained_checkpoint: /workspace/disk/AAAI_VLA_2027/behavior-skill-sim/Final_Checkpoints/Easy/GR00T/gt_behavior_skill_easy_qwengr00t_2b_size_proportional_dropout0_140k/checkpoints/steps_140000_pytorch_model.pt
   is_resume: false
   # 2,208,816 frames x 5 / (16 GPUs x batch 16) = 43,141; rounded to 44k.
   max_train_steps: 44000

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Two-node A800 launcher: survey-112-24 (rank 0) + survey-112-35 (rank 1).
+# Two-node A800 launcher: survey-112-27 (rank 0) + survey-112-98 (rank 1).
 set -Eeuo pipefail
 
-NODE_RANK="${1:?usage: bash train_2node_radio_trash_pi_survey_a800.sh <0|1>}"
+NODE_RANK="${1:?usage: bash train_2node_radio_trash_gr00t_survey_a800.sh <0|1>}"
 [[ "$NODE_RANK" == "0" || "$NODE_RANK" == "1" ]] || {
-  echo "ERROR: NODE_RANK must be 0 (survey-112-24) or 1 (survey-112-35)"
+  echo "ERROR: NODE_RANK must be 0 (survey-112-27) or 1 (survey-112-98)"
   exit 2
 }
 
@@ -13,7 +13,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 cd "$REPO_ROOT"
 source /opt/venv/starvla-qwen35/bin/activate
 
-CONFIG_YAML="${CONFIG_YAML_OVERRIDE:-examples/Behavior-Skill-GT/train_files/training_config/train_gt_behavior_radio_trash_long_plus_easy_skills_qwen35_pi140k_44k.yaml}"
+CONFIG_YAML="${CONFIG_YAML_OVERRIDE:-examples/Behavior-Skill-GT/train_files/training_config/train_gt_behavior_radio_trash_long_plus_easy_skills_qwen35_gr00t140k_44k.yaml}"
 [[ -f "$CONFIG_YAML" ]] || { echo "ERROR: missing config: $CONFIG_YAML"; exit 1; }
 
 CONFIG_RUN_ID="$(awk '$1 == "run_id:" { print $2; exit }' "$CONFIG_YAML")"
@@ -24,7 +24,7 @@ DATA_MIX="$(awk '$1 == "data_mix:" { print $2; exit }' "$CONFIG_YAML")"
 CONFIG_NORM_STATS="$(awk '$1 == "action_norm_stats_path:" { print $2; exit }' "$CONFIG_YAML")"
 CONFIG_PRETRAINED="$(awk '$1 == "pretrained_checkpoint:" { print $2; exit }' "$CONFIG_YAML")"
 
-[[ "$FRAMEWORK_NAME" == "QwenPI_v3" ]] || { echo "ERROR: expected QwenPI_v3"; exit 2; }
+[[ "$FRAMEWORK_NAME" == "QwenGR00T" ]] || { echo "ERROR: expected QwenGR00T"; exit 2; }
 [[ "$ATTN_IMPLEMENTATION" == "flash_attention_2" ]] || { echo "ERROR: expected flash_attention_2"; exit 2; }
 python -c 'import flash_attn' >/dev/null 2>&1 || { echo "ERROR: flash_attn is not installed; refusing SDPA fallback"; exit 2; }
 [[ "$ACTION_MODE" == "b1k_delta" ]] || { echo "ERROR: expected b1k_delta"; exit 2; }
@@ -32,11 +32,11 @@ python -c 'import flash_attn' >/dev/null 2>&1 || { echo "ERROR: flash_attn is no
   echo "ERROR: unexpected data_mix: $DATA_MIX"; exit 2;
 }
 
-EXPECTED_PRETRAINED=/workspace/disk/AAAI_VLA_2027/behavior-skill-sim/Final_Checkpoints/Easy/PI/gt_behavior_skill_easy_qwen35_2b_size_proportional_dropout0_140k_fastio/checkpoints/steps_140000_pytorch_model.pt
+EXPECTED_PRETRAINED=/workspace/disk/AAAI_VLA_2027/behavior-skill-sim/Final_Checkpoints/Easy/GR00T/gt_behavior_skill_easy_qwengr00t_2b_size_proportional_dropout0_140k/checkpoints/steps_140000_pytorch_model.pt
 [[ "$CONFIG_PRETRAINED" == "$EXPECTED_PRETRAINED" ]] || {
-  echo "ERROR: config pretrained checkpoint differs from PI Easy 140K"; exit 2;
+  echo "ERROR: config pretrained checkpoint differs from GR00T Easy 140K"; exit 2;
 }
-[[ -f "$EXPECTED_PRETRAINED" ]] || { echo "ERROR: missing PI Easy 140K: $EXPECTED_PRETRAINED"; exit 1; }
+[[ -f "$EXPECTED_PRETRAINED" ]] || { echo "ERROR: missing GR00T Easy 140K: $EXPECTED_PRETRAINED"; exit 1; }
 
 BASE_VLM=playground/Pretrained_models/Qwen3.5-2B
 [[ -d "$BASE_VLM" ]] || { echo "ERROR: missing Qwen3.5-2B: $BASE_VLM"; exit 1; }
@@ -58,10 +58,10 @@ done
 EXPECTED_NORM_STATS="$REPO_ROOT/examples/Behavior-Skill-GT/norm_stats_easy.json"
 [[ -f "$CONFIG_NORM_STATS" ]] || { echo "ERROR: missing norm stats: $CONFIG_NORM_STATS"; exit 1; }
 [[ "$(readlink -f "$CONFIG_NORM_STATS")" == "$(readlink -f "$EXPECTED_NORM_STATS")" ]] || {
-  echo "ERROR: training must retain PI Easy 140K norm_stats_easy.json"; exit 2;
+  echo "ERROR: training must retain GR00T Easy 140K norm_stats_easy.json"; exit 2;
 }
 
-export MASTER_ADDR="${TRAIN_MASTER_ADDR:-192.168.112.24}"
+export MASTER_ADDR="${TRAIN_MASTER_ADDR:-192.168.112.27}"
 export MASTER_PORT="${TRAIN_MASTER_PORT:-29666}"
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-front1}"
 export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
@@ -97,18 +97,18 @@ if [[ "${SMOKE:-0}" == "1" ]]; then
 fi
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
-  echo "[radio-trash-pi] preflight passed rank=$NODE_RANK run_id=$RUN_ID"
-  echo "[radio-trash-pi] config=$CONFIG_YAML data=$DATA_ROOT"
-  echo "[radio-trash-pi] pretrained=$EXPECTED_PRETRAINED stats=$EXPECTED_NORM_STATS"
-  echo "[radio-trash-pi] master=$MASTER_ADDR:$MASTER_PORT net=$NCCL_SOCKET_IFNAME"
+  echo "[radio-trash-gr00t] preflight passed rank=$NODE_RANK run_id=$RUN_ID"
+  echo "[radio-trash-gr00t] config=$CONFIG_YAML data=$DATA_ROOT"
+  echo "[radio-trash-gr00t] pretrained=$EXPECTED_PRETRAINED stats=$EXPECTED_NORM_STATS"
+  echo "[radio-trash-gr00t] master=$MASTER_ADDR:$MASTER_PORT net=$NCCL_SOCKET_IFNAME"
   exit 0
 fi
 
 OUT="results/Checkpoints/$RUN_ID"
 mkdir -p "$OUT"
 LOG="$OUT/train_node${NODE_RANK}_$(date +%Y%m%d_%H%M%S)_survey_a800.log"
-echo "[radio-trash-pi] rank=$NODE_RANK run_id=$RUN_ID log=$LOG"
-echo "[radio-trash-pi] pretrained=$EXPECTED_PRETRAINED stats=$EXPECTED_NORM_STATS"
+echo "[radio-trash-gr00t] rank=$NODE_RANK run_id=$RUN_ID log=$LOG"
+echo "[radio-trash-gr00t] pretrained=$EXPECTED_PRETRAINED stats=$EXPECTED_NORM_STATS"
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
