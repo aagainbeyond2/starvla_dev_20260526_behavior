@@ -34,6 +34,23 @@ _ACTION_TOKEN_MAX = (
 import torch.nn as nn
 
 
+def _patch_qwen35_flash_attention_position_ids():
+    """Prevent Transformers 5.3 from treating Qwen3.5 3D position ids as packed sequences."""
+    import transformers.modeling_flash_attention_utils as flash_attention_utils
+
+    original = flash_attention_utils._is_packed_sequence
+    if getattr(original, "_starvla_qwen35_3d_safe", False):
+        return
+
+    def _is_packed_sequence_qwen35_safe(position_ids, batch_size):
+        if position_ids is not None and position_ids.dim() > 2:
+            return False
+        return original(position_ids, batch_size)
+
+    _is_packed_sequence_qwen35_safe._starvla_qwen35_3d_safe = True
+    flash_attention_utils._is_packed_sequence = _is_packed_sequence_qwen35_safe
+
+
 class _QWen3_5_VL_Interface(nn.Module):
     """
     This exists because of the diversity of VLMs, so we encapsulate the changes here.
@@ -65,6 +82,10 @@ class _QWen3_5_VL_Interface(nn.Module):
             except ImportError:
                 print("[WARNING] flash_attn not installed, falling back to sdpa")
                 attn_implementation = "sdpa"
+
+        if attn_implementation == "flash_attention_2":
+            _patch_qwen35_flash_attention_position_ids()
+            print("[QWen3_5] enabled 3D position_ids guard for FlashAttention 2")
 
         model = Qwen3_5ForConditionalGeneration.from_pretrained(
             model_id,
