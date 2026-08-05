@@ -146,6 +146,48 @@ def _matches_source_span_name(
     return any(pattern in source_span_name for pattern in allowed_source_span_names)
 
 
+def _get_allowed_task_indices(
+    data_cfg: dict | None,
+    dataset_name: str,
+) -> set[int] | None:
+    if data_cfg is None:
+        return None
+    task_filters = data_cfg.get("include_task_indices_by_dataset")
+    if not task_filters:
+        return None
+    selected = task_filters.get(dataset_name)
+    if selected is None:
+        return None
+    if isinstance(selected, (int, str)):
+        selected = [selected]
+    allowed = {int(task_index) for task_index in selected}
+    if not allowed:
+        raise ValueError(
+            f"include_task_indices_by_dataset[{dataset_name!r}] must not be empty"
+        )
+    return allowed
+
+
+def _load_allowed_task_prompts(
+    dataset_path: Path,
+    allowed_task_indices: set[int],
+) -> set[str]:
+    tasks_path = dataset_path / "meta" / "tasks.jsonl"
+    if not tasks_path.exists():
+        raise FileNotFoundError(
+            f"Task-index filtering requires {tasks_path}, but the file does not exist"
+        )
+    task_prompts_by_index = {}
+    with open(tasks_path, "r", encoding="utf-8") as f:
+        for line in f:
+            task = json.loads(line)
+            task_prompts_by_index[int(task["task_index"])] = str(task["task"])
+    missing = allowed_task_indices - set(task_prompts_by_index)
+    if missing:
+        raise ValueError(f"Task indices {sorted(missing)} are not present in {tasks_path}")
+    return {task_prompts_by_index[index] for index in allowed_task_indices}
+
+
 def _get_b1k_delta_prefix_dim(action_key: str, action_dim: int, qpos_dim: int) -> int:
     expected_action_slice = B1K_ACTION23_SLICES.get(action_key)
     expected_action_dim = 0 if expected_action_slice is None else expected_action_slice.stop - expected_action_slice.start
@@ -329,6 +371,14 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
             if include_source_span_names
             else None
         )
+        allowed_task_indices = _get_allowed_task_indices(
+            self.data_cfg, self.dataset_name
+        )
+        allowed_task_prompts = (
+            _load_allowed_task_prompts(self.dataset_path, allowed_task_indices)
+            if allowed_task_indices is not None
+            else None
+        )
 
         if self._lerobot_version == "v2.0":
             file_path = self.dataset_path / LE_ROBOT_EPISODE_FILENAME
@@ -337,6 +387,12 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
             trajectory_ids = []
             trajectory_lengths = []
             for episode in episode_metadata:
+                episode_tasks = {str(task) for task in episode.get("tasks", [])}
+                if (
+                    allowed_task_prompts is not None
+                    and episode_tasks.isdisjoint(allowed_task_prompts)
+                ):
+                    continue
                 if (
                     allowed_source_span_names is not None
                     and not _matches_source_span_name(
@@ -353,6 +409,15 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
                     f"Filtered {self.dataset_name} to source_span_name containing "
                     f"{sorted(allowed_source_span_names)}: {len(trajectory_ids)} episodes kept"
                 )
+            if allowed_task_indices is not None:
+                print(
+                    f"Filtered {self.dataset_name} to task_index "
+                    f"{sorted(allowed_task_indices)}: {len(trajectory_ids)} episodes kept"
+                )
+                if not trajectory_ids:
+                    raise ValueError(
+                        f"Task filter removed every episode from {self.dataset_name}"
+                    )
             return np.array(trajectory_ids), np.array(trajectory_lengths)
 
         if self._lerobot_version == "v3.0":
@@ -400,6 +465,26 @@ class BehaviorSkillSingleDataset(LeRobotSingleDataset):
             return np.array(trajectory_ids), np.array(trajectory_lengths)
 
         raise ValueError(f"Unsupported lerobot version: {self._lerobot_version}")
+
+    def _get_all_steps(self) -> list[tuple[int, int]]:
+        all_steps = super()._get_all_steps()
+        allowed_task_indices = _get_allowed_task_indices(
+            self.data_cfg, self.dataset_name
+        )
+        if allowed_task_indices is None:
+            return all_steps
+
+        allowed_trajectory_ids = {
+            int(trajectory_id) for trajectory_id in self.trajectory_ids
+        }
+        filtered_steps = [
+            step for step in all_steps if int(step[0]) in allowed_trajectory_ids
+        ]
+        print(
+            f"Filtered {self.dataset_name} step index to task_index "
+            f"{sorted(allowed_task_indices)}: {len(filtered_steps)} steps kept"
+        )
+        return filtered_steps
 
     def _get_steps_config_key(self) -> str:
         config_dict = {

@@ -11,7 +11,11 @@ from torch.utils.data import Sampler
 
 from starVLA.dataloader.gr00t_lerobot.behavior1k_utils import B1K_ACTION23_SLICES
 from starVLA.dataloader.gr00t_lerobot.behavior_skill_dataset import BehaviorSkillSingleDataset
-from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotMixtureDataset, safe_hash
+from starVLA.dataloader.gr00t_lerobot.datasets import (
+    DatasetMetadata,
+    LeRobotMixtureDataset,
+    safe_hash,
+)
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 from starVLA.dataloader.gr00t_lerobot.registry import (
     DATASET_NAMED_MIXTURES,
@@ -76,6 +80,46 @@ class BehaviorSkillMixtureDataset(LeRobotMixtureDataset):
         sample_seed = safe_hash(("behavior-skill-sample", epoch, int(index), int(self.seed)))
         with deterministic_sample_rng(sample_seed):
             return super().__getitem__(index)
+
+    def update_metadata(self, metadata_config: dict, cached_statistics_path=None) -> None:
+        """Merge shared stats while retaining each child's raw video resolution."""
+        video_configs = {
+            json.dumps(
+                dataset.metadata.model_dump(mode="json")["modalities"]["video"],
+                sort_keys=True,
+            )
+            for dataset in self.datasets
+        }
+        if len(video_configs) == 1:
+            return super().update_metadata(metadata_config, cached_statistics_path)
+
+        self.tag = EmbodimentTag.NEW_EMBODIMENT.value
+        self.merged_metadata = {}
+        grouped = {}
+        for dataset in self.datasets:
+            grouped.setdefault(dataset.tag, []).append(dataset.metadata)
+
+        for tag, metadatas in grouped.items():
+            canonical_video = metadatas[0].model_dump(mode="json")["modalities"]["video"]
+            mergeable = []
+            for metadata in metadatas:
+                payload = metadata.model_dump(mode="json")
+                payload["modalities"]["video"] = canonical_video
+                mergeable.append(DatasetMetadata.model_validate(payload))
+            self.merged_metadata[tag] = self.merge_metadata(
+                metadatas=mergeable,
+                dataset_sampling_weights=self.dataset_sampling_weights.tolist(),
+                percentile_mixing_method=metadata_config["percentile_mixing_method"],
+            )
+
+        for dataset in self.datasets:
+            child_payload = self.merged_metadata[dataset.tag].model_dump(mode="json")
+            child_payload["modalities"]["video"] = dataset.metadata.model_dump(
+                mode="json"
+            )["modalities"]["video"]
+            dataset.set_transforms_metadata(
+                DatasetMetadata.model_validate(child_payload)
+            )
 
     def save_dataset_statistics(self, save_path: Path | str, format: str = "json") -> None:
         super().save_dataset_statistics(save_path, format=format)

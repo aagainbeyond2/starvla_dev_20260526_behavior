@@ -184,6 +184,16 @@ DATASET_NAMED_MIXTURES = {
     "gt_behavior_easy4": [
         ("behavior-1k-easy4", 1.0, "R1ProSkill"),
     ],
+    # Easy4 中 radio/trash 两个长任务 + 完成动作链所需的 5 个 Easy Skill。
+    # 配置中的 data_root_dir 必须指 datasets_training/training_data。
+    "gt_behavior_radio_trash_long_plus_easy_skills": [
+        ("behavior-1k-easy4", 1.0, "R1ProSkill"),
+        ("Behavior_Skill_V1.0/easy/pick_up/pick_up_the_radio_from_the_coffee_table", 1.0, "R1ProSkill"),
+        ("Behavior_Skill_V1.0/easy/press/press_the_radio", 1.0, "R1ProSkill"),
+        ("Behavior_Skill_V1.0/easy/pick_up/pick_up_the_trash_can_from_the_floors", 1.0, "R1ProSkill"),
+        ("Behavior_Skill_V1.0/easy/pick_up/pick_up_the_can_of_soda_from_the_floors", 1.0, "R1ProSkill"),
+        ("Behavior_Skill_V1.0/easy/place/place_the_can_of_soda_in_the_trash_can", 1.0, "R1ProSkill"),
+    ],
     # 全量 easy：34 个 skill_subtask
     "gt_behavior_skill_easy": [
         ("close_door/close_the_fridge_door", 1.0, "R1ProSkill"),
