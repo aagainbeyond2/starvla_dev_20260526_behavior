@@ -238,6 +238,45 @@ def _build_b1k_action_ref_config(
 
 
 class BehaviorSkillSingleDataset(LeRobotSingleDataset):
+    """Behavior-Skill dataset with optional config-only task prompt relabeling."""
+
+    def __init__(self, *args, **kwargs):
+        dataset_path = kwargs.get("dataset_path", args[0] if args else None)
+        if dataset_path is None:
+            raise ValueError("BehaviorSkillSingleDataset requires dataset_path")
+        self._mixture_dataset_name = str(
+            kwargs.get("dataset_name") or Path(dataset_path).name
+        )
+        super().__init__(*args, **kwargs)
+
+    def _get_tasks(self) -> pd.DataFrame:
+        tasks = super()._get_tasks()
+        if self.data_cfg is None:
+            return tasks
+
+        prompt_overrides = self.data_cfg.get("task_prompt_overrides_by_dataset")
+        if not prompt_overrides:
+            return tasks
+        override_prompt = prompt_overrides.get(self._mixture_dataset_name)
+        if override_prompt is None:
+            return tasks
+
+        override_prompt = str(override_prompt).strip()
+        if not override_prompt:
+            raise ValueError(
+                "task_prompt_overrides_by_dataset"
+                f"[{self._mixture_dataset_name!r}] must not be empty"
+            )
+
+        tasks = tasks.copy()
+        tasks["task"] = override_prompt
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            print(
+                "Applied task prompt override for "
+                f"{self._mixture_dataset_name}: {override_prompt}"
+            )
+        return tasks
+
     def _init_action_mode(self) -> None:
         if self.data_cfg is None:
             self._action_mode = "abs"
