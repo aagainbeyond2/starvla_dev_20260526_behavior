@@ -233,6 +233,20 @@ DATASET_NAMED_MIXTURES = {
     ],
 }
 
+# Radio/trash long-horizon data ablation. Both mixtures use the common
+# datasets_training/training_data parent as data_root_dir; the task filter in
+# the YAML keeps only Easy4 task indices 0 (radio) and 1 (trash).
+DATASET_NAMED_MIXTURES["gt_behavior_radio_trash_long_only"] = [
+    ("behavior-1k-easy4", 1.0, "R1ProSkill"),
+]
+DATASET_NAMED_MIXTURES["gt_behavior_radio_trash_long_plus_all_easy"] = [
+    ("behavior-1k-easy4", 1.0, "R1ProSkill"),
+    *[
+        (f"Behavior_Skill_V1.0/easy/{name}", weight, robot_type)
+        for name, weight, robot_type in DATASET_NAMED_MIXTURES["gt_behavior_skill_easy"]
+    ],
+]
+
 # 全量混采 gt_behavior_skill_full(471 subtask = easy 34 + normal 169 + hard 268, ~14万 ep)。
 # 由 gen_full_mixture.py 扫目录生成的 gt_behavior_skill_full.json 注册(避免 471 行硬编码;改数据重跑 gen)。
 # name 三级 <difficulty>/<skill_type>/<skill_subtask>, 配置里 data_root_dir 指 Behavior_Skill_V1.0 父目录。
