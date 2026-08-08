@@ -78,12 +78,12 @@ export MASTER_PORT="${TRAIN_MASTER_PORT:-29710}"
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-front1}"
 export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
 export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-front1}"
-# The current A800 IB fabric repeatedly raises client-reregistration/wrong-type
-# errors. The 100GbE front1 TCP path passed both two-node smokes.
-export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+# Use containers with RDMA verbs passed through; survey-112-27 has a down
+# mlx5_6 rail, so the common safe default intentionally excludes that HCA.
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
 export NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5_2,mlx5_3,mlx5_7}"
 export NCCL_DMABUF_ENABLE="${NCCL_DMABUF_ENABLE:-0}"
-export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-0}"
+export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-PIX}"
 export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_BLOCKING_WAIT=1
 export NCCL_TIMEOUT=10000
@@ -114,7 +114,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo "[qweninit-ablation] preflight passed experiment=$EXPERIMENT rank=$NODE_RANK run_id=$RUN_ID"
   echo "[qweninit-ablation] config=$CONFIG_YAML mix=$DATA_MIX steps=$CONFIG_STEPS"
   echo "[qweninit-ablation] qwen=$BASE_VLM pretrained=none stats=$EXPECTED_NORM_STATS"
-  echo "[qweninit-ablation] master=$MASTER_ADDR:$MASTER_PORT net=$NCCL_SOCKET_IFNAME"
+  echo "[qweninit-ablation] master=$MASTER_ADDR:$MASTER_PORT net=$NCCL_SOCKET_IFNAME ib_disable=$NCCL_IB_DISABLE ib_hca=$NCCL_IB_HCA gdr=$NCCL_NET_GDR_LEVEL"
   exit 0
 fi
 
